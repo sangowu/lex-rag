@@ -1,0 +1,36 @@
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Data (large files & downloaded datasets)
+data/cuad_docs/
+data/legalbench_docs/
+data/runs/
+data/omnidocbench_annotations.json
+data/embed_cache*.pkl
+data/*.pkl
+data/*.jsonl
+
+# LLM caches
+.cache/
+
+# Tooling caches
+.ruff_cache/
+
+# Claude Code local settings
+.claude/
+
+# IDE
+.vscode/
+.idea/

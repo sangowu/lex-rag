@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "contract-rag"
+version = "0.1.0"
+description = "Legal contract RAG pipeline with hybrid retrieval, reranking, contextual augmentation, and OCR (CUAD)"
+requires-python = ">=3.11"
+dependencies = [
+    "openai>=1.30",          # OpenAI-compatible embedding API
+    "datasets>=2.19",        # HuggingFace datasets (LegalBench)
+    "pyyaml>=6.0",           # config.yaml parsing
+    "python-dotenv>=1.0",    # .env loading
+    "psycopg[binary]>=3.1",  # PostgreSQL driver
+    "pgvector>=0.2",         # pgvector Python client
+    "tqdm>=4.66",            # progress bars
+    "numpy>=1.26",           # vector ops
+    "google-genai>=1.0",         # Gemini API (Contextual RAG)
+    "ragas>=0.4.3",
+]
+
+[project.scripts]
+legal-rag = "legal_rag_v1.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["legal_rag_v1*"]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.14",
+]
