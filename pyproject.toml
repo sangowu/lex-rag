@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "contract-rag"
+name = "lex-rag"
 version = "0.1.0"
 description = "Legal contract RAG pipeline with hybrid retrieval, reranking, contextual augmentation, and OCR (CUAD)"
 requires-python = ">=3.11"
