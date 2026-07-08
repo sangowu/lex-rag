@@ -10,6 +10,9 @@ class VectorStore:
     def __init__(self, dsn: str, table: str = "chunks"):
         self.conn = psycopg.connect(dsn)
         self.table = table
+        with self.conn.cursor() as cur:
+            cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
+        self.conn.commit()
         register_vector(self.conn)
         self._init_schema()
 

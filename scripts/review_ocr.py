@@ -205,7 +205,7 @@ def main() -> None:
             score = cer(pred_md, gt)
 
             lines += [
-                f"---",
+                "---",
                 f"## {dtype}",
                 f"图像：`{item['image_name']}`　CER: **{score:.4f}**",
                 "",

@@ -1,0 +1,33 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: legal_rag_v1
+      POSTGRES_USER: rag
+      POSTGRES_PASSWORD: ${PG_PASSWORD}
+    ports:
+      - "5433:5432"   # host 5432 already taken by rag_demo-postgres-1
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rag -d legal_rag_v1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build: .
+    ports:
+      - "6800:6800"
+    environment:
+      - EMBED_API_KEY=${EMBED_API_KEY}
+      - PG_PASSWORD=${PG_PASSWORD}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+    volumes:
+      - ./config.docker.yaml:/app/config.yaml:ro
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:

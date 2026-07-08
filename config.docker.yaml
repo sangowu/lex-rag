@@ -1,0 +1,70 @@
+embedding:
+  provider: direct            # direct | ssh_tunnel
+  model: Qwen/Qwen3-Embedding-0.6B
+  base_url: http://host.docker.internal:6006/v1   # host's SSH tunnel to the remote GPU embedding server
+  batch_size: 16
+  max_retries: 2
+  retry_backoff_sec: 1.0
+  # SSH tunnel 参数（provider=ssh_tunnel 时生效）
+  ssh_host: connect.westb.seetacloud.com       # 替换为实际服务器地址 ssh -p 25292 root@connect.westb.seetacloud.com
+  ssh_user: root                # 替换为实际用户名
+  ssh_port: 25292
+  ssh_key_path:      # 替换为实际密钥路径
+  ssh_local_port: 6006
+  ssh_remote_host: 127.0.0.1
+  ssh_remote_port: 1080
+
+chunking:
+  strategy: recursive         # fixed | recursive
+  chunk_chars: 1000
+  overlap: 100
+
+retrieval:
+  mode: hybrid                # vector | bm25 | hybrid
+  top_k: 10
+  rerank_top_k: 60            # 送入 reranker 的候选数（>= top_k）
+
+reranker:
+  enabled: false              # true 时 pipeline.query() 自动 rerank
+  provider: direct            # direct | ssh_tunnel
+  model: BAAI/bge-reranker-v2-m3
+  base_url: http://host.docker.internal:6006      # host's SSH tunnel to the remote GPU reranker server
+  batch_size: 8
+  max_retries: 3
+  retry_backoff_sec: 1.0
+
+database:
+  host: db                    # docker-compose service name, not localhost
+  port: 5432
+  name: legal_rag_v1
+  user: rag
+  table: chunks                # 切换到 chunks_contextual 可对比 contextual RAG 效果
+
+evaluation:
+  k_values: [1, 3, 5, 10]
+  scope: contract             # contract | corpus
+  mode: span                  # span | containment
+
+contextual:
+  enabled: false              # true 时 ingest 阶段为每个 chunk 调用 Gemini 生成上下文前缀
+  model: gemini-3.1-flash-lite
+  rpm_limit: 120               # 免费层 15，付费层最高 2000；控制 API 调用频率
+  max_retries: 3
+  retry_backoff_sec: 2.0      # 指数退避基数（秒）
+  section_chars: 3000         # HierarchicalContextualizer 的 section 切分大小
+
+hyde:
+  enabled: false              # true 时 query 阶段先用 Gemini 生成假设合同条款再 embed（复用 contextual 配置）
+
+multi_query:
+  enabled: false              # true 时将问题改写为 N 个变体，多路检索后 RRF 合并（复用 contextual 配置）
+  n: 3                        # 含原始问题在内的总查询数
+
+parent_child:
+  parent_chars: 1000          # parent chunk 大小（与 chunk_chars 对齐）
+  child_chars: 300             # child chunk 大小（用于检索）
+  overlap: 50                  # child 之间的 overlap
+
+ragas:
+  model: gemini-3.5-flash        # judge 模型，建议强于 generation 模型
+  rpm_limit: 60                  # RAGAS 每轮评估会多次调用 LLM，注意限速

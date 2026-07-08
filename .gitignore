@@ -27,6 +27,8 @@ data/*.jsonl
 
 # Tooling caches
 .ruff_cache/
+.pytest_cache/
+tests/.tmp_test_artifacts/
 
 # Claude Code local settings
 .claude/

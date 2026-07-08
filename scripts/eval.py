@@ -205,7 +205,7 @@ def run_agentic_eval(pipeline, qa_items, cfg, contextual_cfg) -> dict:
 
 
 def print_agentic_result(r: dict) -> None:
-    print(f"\n=== Agentic Eval ===")
+    print("\n=== Agentic Eval ===")
     print(f"  空结果 item   : {r['n_failed']}/{r['n_valid']}  "
           f"empty_rate={r['empty_rate']:.3f}")
     print(f"  恢复数        : {r['n_recovered']}  "

@@ -18,6 +18,9 @@ dependencies = [
     "numpy>=1.26",           # vector ops
     "google-genai>=1.0",         # Gemini API (Contextual RAG)
     "ragas>=0.4.3",
+    "fastapi>=0.115",             # REST API (scripts/serve.py)
+    "uvicorn[standard]>=0.34",   # ASGI server (scripts/serve.py)
+    "gradio>=4.44",               # Web UI (scripts/serve.py, mounted at /ui)
 ]
 
 [project.scripts]
@@ -30,4 +33,5 @@ include = ["legal_rag_v1*"]
 [dependency-groups]
 dev = [
     "ruff>=0.15.14",
+    "pytest>=8.0",
 ]

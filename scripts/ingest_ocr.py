@@ -19,7 +19,6 @@ OCR → RAG 端到端 ingest 脚本。
 """
 from __future__ import annotations
 
-import io
 import time
 from dataclasses import replace
 from pathlib import Path

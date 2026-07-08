@@ -362,13 +362,13 @@ def run_eval(args) -> None:
     overall = summarize(all_results)
     by_type = {k: summarize(v) for k, v in results_by_type.items()}
 
-    print(f"\n=== OCR Eval — OmniDocBench ===")
+    print("\n=== OCR Eval — OmniDocBench ===")
     print(f"  样本总数   : {overall['n']}")
     print(f"  avg CER    : {overall['avg_cer']:.4f}")
     print(f"  avg WER    : {overall['avg_wer']:.4f}")
     print(f"  avg 延迟   : {overall['avg_latency_ms']:.1f} ms")
     if by_type:
-        print(f"\n  --- 按文档类型 ---")
+        print("\n  --- 按文档类型 ---")
         for dtype, m in sorted(by_type.items()):
             print(f"  {dtype:<30} n={m['n']:<4} CER={m['avg_cer']:.4f}  WER={m['avg_wer']:.4f}")
 
