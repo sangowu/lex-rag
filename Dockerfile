@@ -8,7 +8,11 @@ WORKDIR /app
 COPY pyproject.toml ./
 COPY legal_rag_v1 ./legal_rag_v1
 COPY scripts ./scripts
-COPY config.yaml ./
+
+# Swap in an alternate config at build time, e.g.:
+#   docker build --build-arg CONFIG_FILE=config.aws.yaml -t ... .
+ARG CONFIG_FILE=config.yaml
+COPY ${CONFIG_FILE} ./config.yaml
 
 RUN pip install --no-cache-dir -e .
 

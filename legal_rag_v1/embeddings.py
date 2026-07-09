@@ -2,6 +2,7 @@ import pickle
 import time
 from pathlib import Path
 
+import requests
 from openai import OpenAI
 
 from legal_rag_v1.config import EmbeddingConfig
@@ -29,10 +30,12 @@ class EmbeddingClient:
                 remote_port=cfg.ssh_remote_port,
             )
             tunnel.ensure()
-        elif cfg.provider != "direct":
+        elif cfg.provider not in ("direct", "bge_http"):
             raise ValueError(f"Unknown provider: {cfg.provider}")
 
-        self.client = OpenAI(base_url=cfg.base_url, api_key=cfg.api_key)
+        # bge_http talks to a custom FastAPI server (POST /embed), not an
+        # OpenAI-compatible endpoint, so it has no use for the OpenAI SDK client.
+        self.client = None if cfg.provider == "bge_http" else OpenAI(base_url=cfg.base_url, api_key=cfg.api_key)
         self._cache_path = cache_path
         self._cache: dict[str, list[float]] = {}
 
@@ -63,11 +66,29 @@ class EmbeddingClient:
     # ── API 调用（带重试）────────────────────────────────────────
 
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        if self.cfg.provider == "bge_http":
+            return self._embed_batch_bge_http(texts)
+
         last_error = None
         for attempt in range(self.cfg.max_retries + 1):
             try:
                 response = self.client.embeddings.create(model=self.cfg.model, input=texts)
                 return [item.embedding for item in response.data]
+            except Exception as e:
+                last_error = e
+                if attempt < self.cfg.max_retries:
+                    time.sleep(self.cfg.retry_backoff_sec)
+        raise RuntimeError(f"embed_batch failed after {self.cfg.max_retries} retries") from last_error
+
+    def _embed_batch_bge_http(self, texts: list[str]) -> list[list[float]]:
+        """Custom BGE embedding server: POST {texts} -> {embeddings}."""
+        last_error = None
+        url = self.cfg.base_url.rstrip("/") + "/embed"
+        for attempt in range(self.cfg.max_retries + 1):
+            try:
+                resp = requests.post(url, json={"texts": texts}, timeout=60)
+                resp.raise_for_status()
+                return resp.json()["embeddings"]
             except Exception as e:
                 last_error = e
                 if attempt < self.cfg.max_retries:

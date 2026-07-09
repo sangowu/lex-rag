@@ -36,3 +36,6 @@ tests/.tmp_test_artifacts/
 # IDE
 .vscode/
 .idea/
+
+# Deploy scratch files
+deploy/.tg_arn

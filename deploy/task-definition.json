@@ -1,0 +1,35 @@
+{
+  "family": "legal-rag-v1",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "1024",
+  "memory": "2048",
+  "executionRoleArn": "arn:aws:iam::569260897196:role/rag-ecs-execution-role",
+  "taskRoleArn": "arn:aws:iam::569260897196:role/rag-ecs-task-role",
+  "containerDefinitions": [
+    {
+      "name": "legal-rag-v1",
+      "image": "569260897196.dkr.ecr.eu-west-1.amazonaws.com/legal-rag-v1:latest",
+      "command": ["python", "scripts/serve.py", "--host", "0.0.0.0", "--port", "6800", "--root-path", "/legal-rag"],
+      "portMappings": [
+        {"containerPort": 6800, "protocol": "tcp"}
+      ],
+      "environment": [
+        {"name": "EMBED_API_KEY", "value": ""}
+      ],
+      "secrets": [
+        {"name": "PG_PASSWORD", "valueFrom": "arn:aws:secretsmanager:eu-west-1:569260897196:secret:legal-rag-v1/pg-password-UbCiTD"},
+        {"name": "GEMINI_API_KEY", "valueFrom": "arn:aws:secretsmanager:eu-west-1:569260897196:secret:legal-rag-v1/gemini-api-key-d9dqXJ"}
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/legal-rag-v1",
+          "awslogs-region": "eu-west-1",
+          "awslogs-stream-prefix": "ecs",
+          "awslogs-create-group": "true"
+        }
+      }
+    }
+  ]
+}

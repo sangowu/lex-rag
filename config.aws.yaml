@@ -1,0 +1,69 @@
+embedding:
+  provider: bge_http           # custom BGE-M3 server on the reused rag-embedding-server EC2 instance
+  model: BAAI/bge-m3
+  base_url: http://172.31.30.33:8000   # GPU server's private IP (same VPC, no tunnel needed)
+  batch_size: 16
+  max_retries: 2
+  retry_backoff_sec: 1.0
+  ssh_host:
+  ssh_user: root
+  ssh_port: 22
+  ssh_key_path:
+  ssh_local_port: 6006
+  ssh_remote_host: 127.0.0.1
+  ssh_remote_port: 1080
+
+chunking:
+  strategy: recursive         # fixed | recursive
+  chunk_chars: 1000
+  overlap: 100
+
+retrieval:
+  mode: hybrid                # vector | bm25 | hybrid
+  top_k: 10
+  rerank_top_k: 60            # 送入 reranker 的候选数（>= top_k）
+
+reranker:
+  enabled: true
+  provider: bge_http           # same custom BGE-reranker-v2-m3 server
+  model: BAAI/bge-reranker-v2-m3
+  base_url: http://172.31.30.33:8000
+  batch_size: 8
+  max_retries: 3
+  retry_backoff_sec: 1.0
+
+database:
+  host: rag-database-1.cn4eui80g8r4.eu-west-1.rds.amazonaws.com
+  port: 5432
+  name: legal_rag_v1
+  user: postgres_sango         # rag-database-1's actual role structure: master user only, no separate app role
+  table: chunks_contextual     # recall-first profile — matches the BGE-M3 embeddings this GPU server actually hosts
+
+evaluation:
+  k_values: [1, 3, 5, 10]
+  scope: contract             # contract | corpus
+  mode: span                  # span | containment
+
+contextual:
+  enabled: false
+  model: gemini-3.1-flash-lite
+  rpm_limit: 120
+  max_retries: 3
+  retry_backoff_sec: 2.0
+  section_chars: 3000
+
+hyde:
+  enabled: false
+
+multi_query:
+  enabled: false
+  n: 3
+
+parent_child:
+  parent_chars: 1000
+  child_chars: 300
+  overlap: 50
+
+ragas:
+  model: gemini-3.5-flash
+  rpm_limit: 60

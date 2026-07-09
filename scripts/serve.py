@@ -390,6 +390,26 @@ def build_ui():
 
 
 # ---------------------------------------------------------------------------
+# 子路径部署支持
+# ---------------------------------------------------------------------------
+
+class RootPathMiddleware:
+    """ALB 路径路由（如 /legal-rag/*）转发时不会剥离前缀，uvicorn 的 root_path
+    参数只影响 URL 生成、不改变实际路由匹配，所以这里手动剥离前缀后再交给 app。"""
+
+    def __init__(self, app, root_path: str):
+        self.app = app
+        self.root_path = root_path
+
+    async def __call__(self, scope, receive, send):
+        if self.root_path and scope["type"] == "http" and scope["path"].startswith(self.root_path):
+            scope = dict(scope)
+            scope["path"] = scope["path"][len(self.root_path):] or "/"
+            scope["root_path"] = self.root_path
+        await self.app(scope, receive, send)
+
+
+# ---------------------------------------------------------------------------
 # 入口
 # ---------------------------------------------------------------------------
 
@@ -398,12 +418,15 @@ if __name__ == "__main__":
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=6800)
     parser.add_argument("--no-ui", action="store_true", help="不挂载 Gradio UI，仅提供 API")
+    parser.add_argument("--root-path", default="", help="子路径部署时的前缀（如 ALB 路径路由 /legal-rag）")
     args = parser.parse_args()
 
     if not args.no_ui:
         import gradio as gr
         demo = build_ui()
         app_with_ui = gr.mount_gradio_app(app, demo, path="/ui")
-        uvicorn.run(app_with_ui, host=args.host, port=args.port, timeout_graceful_shutdown=3)
+        target = RootPathMiddleware(app_with_ui, args.root_path)
+        uvicorn.run(target, host=args.host, port=args.port, timeout_graceful_shutdown=3)
     else:
-        uvicorn.run(app, host=args.host, port=args.port, timeout_graceful_shutdown=3)
+        target = RootPathMiddleware(app, args.root_path)
+        uvicorn.run(target, host=args.host, port=args.port, timeout_graceful_shutdown=3)
