@@ -1,5 +1,4 @@
 from pathlib import Path
-from tqdm import tqdm
 from legal_rag_v1.config import AppConfig
 from legal_rag_v1.chunking import chunk_text, chunk_parent_child, ChunkWindow
 from legal_rag_v1.embeddings import EmbeddingClient
@@ -100,8 +99,13 @@ class RAGPipeline:
     def ingest(self, docs_dir: Path) -> None:
         if not docs_dir.exists():
             raise FileNotFoundError(f"Documents directory not found: {docs_dir}")
-        for path in tqdm(list(docs_dir.glob("*.txt")), desc="Ingesting"):
+        paths = list(docs_dir.glob("*.txt"))
+        # 显式换行日志：tqdm 默认用 \r 刷新进度条，在非 TTY 环境（如 ECS/
+        # CloudWatch）里可能被日志驱动缓冲、迟迟看不到任何输出，容易被误判为卡死。
+        for i, path in enumerate(paths, 1):
+            print(f"[{i}/{len(paths)}] ingesting {path.stem} ...", flush=True)
             self._ingest_one(path.stem, path.read_text(encoding="utf-8"))
+        print(f"Ingested {len(paths)} documents.", flush=True)
 
     def ingest_document(self, path: Path) -> None:
         """增量 ingest 单个文档，不清空现有数据（用于运行时文档上传）。"""

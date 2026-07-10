@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import json
 import re
-from huggingface_hub import hf_hub_download
+import requests
 
 
 @dataclass
@@ -23,13 +23,15 @@ class QAItem:
     has_answer: bool
 
 def _load_cuad_json() -> list:
-    local_path = hf_hub_download(
-        repo_id="theatticusproject/cuad",
-        repo_type="dataset",
-        filename="CUAD_v1/CUAD_v1.json",
-    )
-    with open(local_path, encoding="utf-8") as f:
-        return json.load(f)["data"]   # 返回 doc 列表
+    # 直接走 HTTP 下载而非 huggingface_hub 的 hf_hub_download：
+    # 该数据集用 HF 的 Xet 分块存储后端，hf_hub_download 会走 hf_xet 的下载
+    # 协议，在缺少/异常的网络环境下会静默挂起且不抛错、不产生任何输出
+    # （曾在 AWS ECS 任务里卡住 2 小时以上）。plain requests.get 直接打
+    # resolve 重定向后的 CDN 地址则稳定可用。
+    url = "https://huggingface.co/datasets/theatticusproject/cuad/resolve/main/CUAD_v1/CUAD_v1.json"
+    resp = requests.get(url, timeout=60)
+    resp.raise_for_status()
+    return resp.json()["data"]   # 返回 doc 列表
 
 def build_qa_from_hf(docs_dir, qa_path, limit=None):
     docs_dir.mkdir(parents=True, exist_ok=True)
