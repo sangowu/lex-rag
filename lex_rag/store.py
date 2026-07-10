@@ -3,7 +3,7 @@ import json
 import numpy as np
 import psycopg
 from pgvector.psycopg import register_vector
-from legal_rag_v1.chunking import ChunkWindow
+from lex_rag.chunking import ChunkWindow
 
 
 class VectorStore:

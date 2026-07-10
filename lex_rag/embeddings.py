@@ -5,8 +5,8 @@ from pathlib import Path
 import requests
 from openai import OpenAI
 
-from legal_rag_v1.config import EmbeddingConfig
-from legal_rag_v1 import ssh_tunnel as _ssh
+from lex_rag.config import EmbeddingConfig
+from lex_rag import ssh_tunnel as _ssh
 
 _DEFAULT_CACHE = Path("data/embed_cache.pkl")
 

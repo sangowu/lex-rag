@@ -225,8 +225,8 @@ parent_child:{ parent_chars: 1000, child_chars: 300 }         # small-to-big ret
 ## Project structure
 
 ```
-legal_rag_v1/
-├── legal_rag_v1/            # core package (~2.3k LOC)
+lex-rag/
+├── lex_rag/                 # core package (~2.3k LOC)
 │   ├── pipeline.py          # the single orchestrator: ingest + query paths
 │   ├── store.py             # pgvector + BM25 store, dynamic table names, auto-schema
 │   ├── chunking.py          # recursive & parent-child chunkers

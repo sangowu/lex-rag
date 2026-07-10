@@ -2,7 +2,7 @@
 Generation 层：将检索到的 chunks 合成为带引用的自然语言答案。
 
 用法：
-    from legal_rag_v1.generator import LegalGenerator
+    from lex_rag.generator import LegalGenerator
     gen = LegalGenerator(cfg.contextual)
     result = gen.generate(question, chunks)
 """
@@ -15,8 +15,8 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Iterator
 
-from legal_rag_v1.chunking import ChunkWindow
-from legal_rag_v1.config import ContextualConfig
+from lex_rag.chunking import ChunkWindow
+from lex_rag.config import ContextualConfig
 
 _GENERATE_PROMPT = """\
 You are a legal contract analysis assistant. Answer questions based ONLY on the contract excerpts provided.

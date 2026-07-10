@@ -4,9 +4,9 @@
 """
 from __future__ import annotations
 
-from legal_rag_v1.config import load_config
-from legal_rag_v1.generator import LegalGenerator
-from legal_rag_v1.pipeline import RAGPipeline
+from lex_rag.config import load_config
+from lex_rag.generator import LegalGenerator
+from lex_rag.pipeline import RAGPipeline
 
 _pipeline: RAGPipeline | None = None
 _generator: LegalGenerator | None = None

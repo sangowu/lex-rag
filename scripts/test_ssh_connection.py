@@ -9,8 +9,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from legal_rag_v1.config import load_config
-from legal_rag_v1.ssh_tunnel import get_or_create
+from lex_rag.config import load_config
+from lex_rag.ssh_tunnel import get_or_create
 
 
 def main() -> None:

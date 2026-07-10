@@ -24,10 +24,10 @@ from pathlib import Path
 import psycopg
 from tqdm import tqdm
 
-from legal_rag_v1.config import load_config
-from legal_rag_v1.cuad import load_qa
-from legal_rag_v1.evals import evaluate
-from legal_rag_v1.pipeline import RAGPipeline
+from lex_rag.config import load_config
+from lex_rag.cuad import load_qa
+from lex_rag.evals import evaluate
+from lex_rag.pipeline import RAGPipeline
 
 
 CHUNK_CHARS     = [1000, 1200]

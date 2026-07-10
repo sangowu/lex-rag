@@ -10,9 +10,9 @@ import argparse
 from dataclasses import replace
 from pathlib import Path
 
-from legal_rag_v1.config import load_config
-from legal_rag_v1.cuad import build_qa_from_hf
-from legal_rag_v1.pipeline import RAGPipeline
+from lex_rag.config import load_config
+from lex_rag.cuad import build_qa_from_hf
+from lex_rag.pipeline import RAGPipeline
 
 
 def main() -> None:

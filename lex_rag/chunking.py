@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from legal_rag_v1.config import ChunkingConfig
+from lex_rag.config import ChunkingConfig
 from collections.abc import Iterator
 import re
 

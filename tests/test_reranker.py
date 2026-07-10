@@ -2,9 +2,9 @@
 
 from unittest.mock import MagicMock, patch
 
-from legal_rag_v1.chunking import ChunkWindow
-from legal_rag_v1.config import RerankConfig
-from legal_rag_v1.reranker import RerankClient
+from lex_rag.chunking import ChunkWindow
+from lex_rag.config import RerankConfig
+from lex_rag.reranker import RerankClient
 
 
 def _cfg(batch_size: int = 32) -> RerankConfig:
@@ -82,7 +82,7 @@ def test_bge_http_provider_uses_plain_rerank_path():
 def test_bge_http_provider_posts_query_and_texts_and_parses_scores():
     client = RerankClient(_bge_http_cfg())
 
-    with patch("legal_rag_v1.reranker.requests.post") as mock_post:
+    with patch("lex_rag.reranker.requests.post") as mock_post:
         mock_post.return_value.json.return_value = {"scores": [0.2, 0.8]}
         mock_post.return_value.raise_for_status.return_value = None
 

@@ -42,7 +42,7 @@ def main():
 
     # ── 1. 配置加载 ─────────────────────────────────────────────
     print("\n[1] Config")
-    from legal_rag_v1.config import load_config
+    from lex_rag.config import load_config
     cfg = load_config()
     ok &= check("load_config", lambda: f"chunk={cfg.chunking.chunk_chars}, mode={cfg.retrieval.mode}")
 
@@ -64,7 +64,7 @@ def main():
 
     # ── 3. Embedding 服务 ────────────────────────────────────────
     print("\n[3] Embedding")
-    from legal_rag_v1.embeddings import EmbeddingClient
+    from lex_rag.embeddings import EmbeddingClient
     client = EmbeddingClient(cfg.embedding, cache_path=None)
 
     def test_embed():
@@ -79,13 +79,13 @@ def main():
     if not args.reranker:
         print("  [SKIP] 传入 --reranker 参数以启用此测试")
     else:
-        from legal_rag_v1.reranker import RerankClient
+        from lex_rag.reranker import RerankClient
         from dataclasses import replace
         rr_cfg = replace(cfg.reranker, enabled=True)
         rr_client = RerankClient(rr_cfg)
 
         def test_rerank():
-            from legal_rag_v1.chunking import ChunkWindow
+            from lex_rag.chunking import ChunkWindow
             chunks = [
                 ChunkWindow("id1", "doc1", "This agreement is governed by California law.", 0, 44),
                 ChunkWindow("id2", "doc1", "The parties agree to arbitration in New York.", 0, 45),
@@ -97,7 +97,7 @@ def main():
 
     # ── 5. 检索 ──────────────────────────────────────────────────
     print("\n[5] Retrieval")
-    from legal_rag_v1.pipeline import RAGPipeline
+    from lex_rag.pipeline import RAGPipeline
     from dataclasses import replace
 
     pipeline = RAGPipeline(cfg)
@@ -118,8 +118,8 @@ def main():
 
     # ── 6. 评估（前 N 条）───────────────────────────────────────
     print(f"\n[6] Evaluation (first {args.n_eval} QA items)")
-    from legal_rag_v1.cuad import load_qa
-    from legal_rag_v1.evals import evaluate
+    from lex_rag.cuad import load_qa
+    from lex_rag.evals import evaluate
 
     qa_path = Path(args.qa_file)
     if not qa_path.exists():

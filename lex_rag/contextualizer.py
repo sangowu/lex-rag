@@ -14,8 +14,8 @@ import json
 import time
 from pathlib import Path
 
-from legal_rag_v1.chunking import ChunkWindow
-from legal_rag_v1.config import ContextualConfig
+from lex_rag.chunking import ChunkWindow
+from lex_rag.config import ContextualConfig
 
 _PROMPT = """\
 <document>

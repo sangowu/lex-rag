@@ -112,8 +112,8 @@ def ocr_file(path: Path, api_url: str, client: httpx.Client,
 
 def main() -> None:
     import argparse
-    from legal_rag_v1.config import load_config
-    from legal_rag_v1.pipeline import RAGPipeline
+    from lex_rag.config import load_config
+    from lex_rag.pipeline import RAGPipeline
 
     parser = argparse.ArgumentParser(
         description="扫描件 OCR → RAG ingest 端到端脚本"

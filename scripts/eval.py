@@ -23,10 +23,10 @@ from pathlib import Path
 
 from tqdm import tqdm
 
-from legal_rag_v1.config import load_config
-from legal_rag_v1.cuad import load_qa
-from legal_rag_v1.evals import _hit, evaluate
-from legal_rag_v1.pipeline import RAGPipeline
+from lex_rag.config import load_config
+from lex_rag.cuad import load_qa
+from lex_rag.evals import _hit, evaluate
+from lex_rag.pipeline import RAGPipeline
 
 
 OUT_DIR = Path("data/runs/eval")
@@ -114,7 +114,7 @@ def run_agentic_eval(pipeline, qa_items, cfg, contextual_cfg) -> dict:
     Pass 1：标准检索，找出 chunks==[] 的 failed_set。
     Pass 2：仅对 failed_set 运行 AgenticPipeline，统计恢复率。
     """
-    from legal_rag_v1.agent import AgenticPipeline
+    from lex_rag.agent import AgenticPipeline
 
     agent  = AgenticPipeline(pipeline, contextual_cfg)
     max_k  = max(cfg.k_values)

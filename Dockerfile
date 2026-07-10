@@ -4,11 +4,11 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# Install the package in editable mode so legal_rag_v1/config.py's
+# Install the package in editable mode so lex_rag/config.py's
 # Path(__file__).parent.parent resolves to /app (where config.yaml lives),
 # matching local dev (`uv pip install -e .`).
 COPY pyproject.toml ./
-COPY legal_rag_v1 ./legal_rag_v1
+COPY lex_rag ./lex_rag
 COPY scripts ./scripts
 
 # Swap in an alternate config at build time, e.g.:

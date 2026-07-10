@@ -3,8 +3,8 @@
 import pickle
 from unittest.mock import MagicMock, patch
 
-from legal_rag_v1.config import EmbeddingConfig
-from legal_rag_v1.embeddings import EmbeddingClient
+from lex_rag.config import EmbeddingConfig
+from lex_rag.embeddings import EmbeddingClient
 
 
 def _cfg(batch_size: int = 2) -> EmbeddingConfig:
@@ -76,7 +76,7 @@ def _bge_http_cfg() -> EmbeddingConfig:
 def test_bge_http_provider_posts_to_embed_endpoint_and_parses_embeddings(tmp_path_local):
     client = EmbeddingClient(_bge_http_cfg(), cache_path=tmp_path_local / "cache.pkl")
 
-    with patch("legal_rag_v1.embeddings.requests.post") as mock_post:
+    with patch("lex_rag.embeddings.requests.post") as mock_post:
         mock_post.return_value.json.return_value = {"embeddings": [[0.1, 0.2], [0.3, 0.4]]}
         mock_post.return_value.raise_for_status.return_value = None
 

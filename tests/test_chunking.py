@@ -1,6 +1,6 @@
 """Unit tests for chunking.py pure-logic chunk-splitting functions."""
 
-from legal_rag_v1.chunking import chunk_fixed, chunk_recursive, chunk_parent_child
+from lex_rag.chunking import chunk_fixed, chunk_recursive, chunk_parent_child
 
 
 def test_chunk_fixed_basic_split():

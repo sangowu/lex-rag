@@ -7,8 +7,8 @@ methods, mirroring the pattern used in rag_demo's test_vector_store_dense_embedd
 
 from unittest.mock import MagicMock
 
-from legal_rag_v1.chunking import ChunkWindow
-from legal_rag_v1.store import VectorStore
+from lex_rag.chunking import ChunkWindow
+from lex_rag.store import VectorStore
 
 
 def _make_store() -> VectorStore:

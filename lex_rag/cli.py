@@ -1,10 +1,10 @@
 import argparse
 from pathlib import Path
 
-from legal_rag_v1.config import load_config
-from legal_rag_v1.pipeline import RAGPipeline
-from legal_rag_v1.cuad import load_qa
-from legal_rag_v1.evals import evaluate, save_result
+from lex_rag.config import load_config
+from lex_rag.pipeline import RAGPipeline
+from lex_rag.cuad import load_qa
+from lex_rag.evals import evaluate, save_result
 
 
 def cmd_ingest(args, pipeline: RAGPipeline) -> None:

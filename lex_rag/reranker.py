@@ -14,8 +14,8 @@ RerankClient: 对候选 chunk 列表重新打分排序。
 """
 import time
 import requests
-from legal_rag_v1.config import RerankConfig
-from legal_rag_v1.chunking import ChunkWindow
+from lex_rag.config import RerankConfig
+from lex_rag.chunking import ChunkWindow
 
 
 class RerankClient:

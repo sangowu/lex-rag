@@ -2,7 +2,7 @@
 Agentic 迭代检索：当初次检索无结果时，用 LLM 重写查询并重试。
 
 用法：
-    from legal_rag_v1.agent import AgenticPipeline
+    from lex_rag.agent import AgenticPipeline
     agent = AgenticPipeline(pipeline, cfg.contextual)
 
     # 带实时状态的流式调用（UI 用）
@@ -20,9 +20,9 @@ from __future__ import annotations
 import time
 from typing import Iterator
 
-from legal_rag_v1.chunking import ChunkWindow
-from legal_rag_v1.config import ContextualConfig
-from legal_rag_v1.pipeline import RAGPipeline
+from lex_rag.chunking import ChunkWindow
+from lex_rag.config import ContextualConfig
+from lex_rag.pipeline import RAGPipeline
 
 _REWRITE_PROMPT = """\
 A semantic search over legal contract text failed to return relevant results for the following query.

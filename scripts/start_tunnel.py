@@ -13,7 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from legal_rag_v1.config import load_config
+from lex_rag.config import load_config
 
 
 def build_ssh_cmd(cfg) -> list[str]:

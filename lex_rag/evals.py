@@ -4,10 +4,10 @@ import json
 import time
 from tqdm import tqdm
 
-from legal_rag_v1.config import EvalConfig
-from legal_rag_v1.cuad import QAItem, Span 
-from legal_rag_v1.pipeline import RAGPipeline
-from legal_rag_v1.chunking import ChunkWindow
+from lex_rag.config import EvalConfig
+from lex_rag.cuad import QAItem, Span 
+from lex_rag.pipeline import RAGPipeline
+from lex_rag.chunking import ChunkWindow
 
 
 @dataclass

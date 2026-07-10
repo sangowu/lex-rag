@@ -2,9 +2,9 @@
 
 from unittest.mock import MagicMock
 
-from legal_rag_v1.chunking import ChunkWindow
-from legal_rag_v1.config import ContextualConfig
-from legal_rag_v1.generator import LegalGenerator
+from lex_rag.chunking import ChunkWindow
+from lex_rag.config import ContextualConfig
+from lex_rag.generator import LegalGenerator
 
 
 def _cfg() -> ContextualConfig:

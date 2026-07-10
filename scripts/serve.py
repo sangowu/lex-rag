@@ -24,8 +24,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from legal_rag_v1._shared import get_generator, get_pipeline
-from legal_rag_v1.generator import GenerationResult
+from lex_rag._shared import get_generator, get_pipeline
+from lex_rag.generator import GenerationResult
 
 # ---------------------------------------------------------------------------
 # FastAPI 应用
@@ -73,8 +73,8 @@ def _run_query(req: QueryRequest) -> QueryResponse:
     generator = get_generator()
 
     if req.agentic:
-        from legal_rag_v1.agent import AgenticPipeline
-        from legal_rag_v1.config import load_config
+        from lex_rag.agent import AgenticPipeline
+        from lex_rag.config import load_config
         agent = AgenticPipeline(pipeline, load_config().contextual)
         chunks, query_trace = agent.query(req.question, doc_id=req.doc_id, k=req.top_k)
     else:
@@ -121,8 +121,8 @@ async def _stream_query(req: QueryRequest):
     generator = get_generator()
 
     if req.agentic:
-        from legal_rag_v1.agent import AgenticPipeline
-        from legal_rag_v1.config import load_config
+        from lex_rag.agent import AgenticPipeline
+        from lex_rag.config import load_config
         agent = AgenticPipeline(pipeline, load_config().contextual)
         chunks, query_trace = await loop.run_in_executor(
             None, lambda: agent.query(req.question, doc_id=req.doc_id, k=req.top_k)
@@ -227,8 +227,8 @@ def _ui_query(
     retrieval_log: list[str] = []
 
     if use_agentic:
-        from legal_rag_v1.agent import AgenticPipeline
-        from legal_rag_v1.config import load_config
+        from lex_rag.agent import AgenticPipeline
+        from lex_rag.config import load_config
         agent = AgenticPipeline(pipeline, load_config().contextual)
         chunks, query_trace = [], [message]
         for event in agent.query_stream(message, doc_id=query_doc_id, k=top_k):

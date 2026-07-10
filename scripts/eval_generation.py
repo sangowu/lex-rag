@@ -20,10 +20,10 @@ from pathlib import Path
 
 from dataclasses import replace
 
-from legal_rag_v1.config import load_config, RagasConfig
-from legal_rag_v1.cuad import load_qa, QAItem
-from legal_rag_v1.generator import LegalGenerator, GenerationResult
-from legal_rag_v1.pipeline import RAGPipeline
+from lex_rag.config import load_config, RagasConfig
+from lex_rag.cuad import load_qa, QAItem
+from lex_rag.generator import LegalGenerator, GenerationResult
+from lex_rag.pipeline import RAGPipeline
 
 
 # ---------------------------------------------------------------------------
@@ -46,7 +46,7 @@ def compute_semantic_hits(
     threshold: float,
 ) -> int:
     """批量 embed，计算 answer 与最优 gold 的余弦相似度，更新 per_item_rows["semantic_hit"]。"""
-    from legal_rag_v1.embeddings import EmbeddingClient
+    from lex_rag.embeddings import EmbeddingClient
 
     # 收集所有待 embed 的文本（去重）
     all_texts: list[str] = []

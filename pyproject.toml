@@ -24,11 +24,11 @@ dependencies = [
 ]
 
 [project.scripts]
-legal-rag = "legal_rag_v1.cli:main"
+lex-rag = "lex_rag.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["legal_rag_v1*"]
+include = ["lex_rag*"]
 
 [dependency-groups]
 dev = [

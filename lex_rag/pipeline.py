@@ -1,9 +1,9 @@
 from pathlib import Path
-from legal_rag_v1.config import AppConfig
-from legal_rag_v1.chunking import chunk_text, chunk_parent_child, ChunkWindow
-from legal_rag_v1.embeddings import EmbeddingClient
-from legal_rag_v1.reranker import RerankClient
-from legal_rag_v1.store import VectorStore
+from lex_rag.config import AppConfig
+from lex_rag.chunking import chunk_text, chunk_parent_child, ChunkWindow
+from lex_rag.embeddings import EmbeddingClient
+from lex_rag.reranker import RerankClient
+from lex_rag.store import VectorStore
 
 
 def _rrf_merge(result_lists: list[list[ChunkWindow]], k: int = 60) -> list[ChunkWindow]:
@@ -23,7 +23,7 @@ def _rrf_merge(result_lists: list[list[ChunkWindow]], k: int = 60) -> list[Chunk
 class RAGPipeline:
     def __init__(self, cfg: AppConfig, cache_path: Path | None = None, refresh_cache: bool = False):
         self.cfg = cfg
-        from legal_rag_v1.embeddings import _DEFAULT_CACHE
+        from lex_rag.embeddings import _DEFAULT_CACHE
         self.embedder = EmbeddingClient(
             cfg.embedding,
             cache_path=cache_path or _DEFAULT_CACHE,
@@ -36,28 +36,28 @@ class RAGPipeline:
         self.contextualizer = None
         if cfg.contextual.enabled:
             if cfg.contextual_mode == "hierarchical":
-                from legal_rag_v1.contextualizer import HierarchicalContextualizer
+                from lex_rag.contextualizer import HierarchicalContextualizer
                 self.contextualizer = HierarchicalContextualizer(cfg.contextual)
             else:
-                from legal_rag_v1.contextualizer import ContextualClient
+                from lex_rag.contextualizer import ContextualClient
                 self.contextualizer = ContextualClient(cfg.contextual)
 
         # meta extractor（懒初始化，ingest 时按需创建）
         self._meta_extractor = None
         if cfg.extract_meta:
-            from legal_rag_v1.contextualizer import MetadataExtractor
+            from lex_rag.contextualizer import MetadataExtractor
             self._meta_extractor = MetadataExtractor(cfg.contextual)
 
         # HyDE client（查询阶段使用，不影响 ingest；复用 contextual 的 Gemini 配置）
         self._hyde = None
         if cfg.hyde_enabled:
-            from legal_rag_v1.contextualizer import HyDEClient
+            from lex_rag.contextualizer import HyDEClient
             self._hyde = HyDEClient(cfg.contextual)
 
         # Multi-Query expander（复用 contextual 的 Gemini 配置）
         self._expander = None
         if cfg.multi_query_enabled:
-            from legal_rag_v1.contextualizer import QueryExpander
+            from lex_rag.contextualizer import QueryExpander
             self._expander = QueryExpander(cfg.contextual, n=cfg.multi_query_n)
 
         # 缓存 chunk_mode，避免每次 query 都访问 DB
