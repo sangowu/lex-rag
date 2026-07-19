@@ -21,7 +21,7 @@ from lex_rag.chunking import ChunkWindow
 class RerankClient:
     def __init__(self, cfg: RerankConfig):
         self.cfg = cfg
-        path = "/rerank" if cfg.provider == "bge_http" else "/v1/rerank"
+        path = "/rerank" if cfg.provider in ("bge_http", "macrolens") else "/v1/rerank"
         self._url = cfg.base_url.rstrip("/") + path
 
     def rerank(self, query: str, chunks: list[ChunkWindow], top_k: int) -> list[ChunkWindow]:
@@ -38,6 +38,8 @@ class RerankClient:
         """调用 rerank 接口，返回与输入 texts 顺序一致的分数列表。"""
         if self.cfg.provider == "bge_http":
             return self._score_batch_bge_http(query, texts)
+        if self.cfg.provider == "macrolens":
+            return self._score_batch_macrolens(query, texts)
 
         last_error = None
         for attempt in range(self.cfg.max_retries + 1):
@@ -54,10 +56,11 @@ class RerankClient:
                     time.sleep(self.cfg.retry_backoff_sec)
                 continue
             # HTTP 成功后解析不重试，直接抛出
-            results = resp.json()["results"]   # [{"index": i, "document": ..., "score": f}, ...]
+            results = resp.json()["results"]   # [{"index": i, "score"/"relevance_score": f}, ...]
             scores = [0.0] * len(texts)
             for item in results:
-                scores[item["index"]] = item["score"]
+                # TEI 返回 "score"；llama.cpp reranking 返回 "relevance_score"
+                scores[item["index"]] = item.get("score", item.get("relevance_score", 0.0))
             return scores
         raise RuntimeError(f"_score_batch failed after {self.cfg.max_retries} retries") from last_error
 
@@ -66,6 +69,20 @@ class RerankClient:
         for attempt in range(self.cfg.max_retries + 1):
             try:
                 resp = requests.post(self._url, json={"query": query, "texts": texts}, timeout=30)
+                resp.raise_for_status()
+                return resp.json()["scores"]
+            except Exception as e:
+                last_error = e
+                if attempt < self.cfg.max_retries:
+                    time.sleep(self.cfg.retry_backoff_sec)
+        raise RuntimeError(f"_score_batch failed after {self.cfg.max_retries} retries") from last_error
+
+    def _score_batch_macrolens(self, query: str, texts: list[str]) -> list[float]:
+        """MacroLens cloud_server：POST /rerank {query, documents} -> {scores}（顺序与 documents 一致）。"""
+        last_error = None
+        for attempt in range(self.cfg.max_retries + 1):
+            try:
+                resp = requests.post(self._url, json={"query": query, "documents": texts}, timeout=60)
                 resp.raise_for_status()
                 return resp.json()["scores"]
             except Exception as e:
