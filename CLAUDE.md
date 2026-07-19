@@ -63,13 +63,54 @@ uv run scripts/ingest_ocr.py --input-dir data/scanned_docs --api-url http://127.
 uv run scripts/ingest_ocr.py --input-dir data/scanned_docs --table chunks_ocr --no-truncate  # 增量追加
 ```
 
+## 本地模型运行（脱离远程 GPU，全本地推理）
+
+用本地模型替代远程 GPU（SSH 隧道）跑通全链路：embedding 与 reranker 各起一个 **llama.cpp** 实例，
+生成/Judge 仍用云端 Gemini。`config.yaml` 已指向本地端点（embedding→8081、reranker→6006、DB→5433）。
+
+**按顺序启动三个服务，再跑 ingest / eval：**
+```bash
+# 1. 向量库（lex_rag 自己的 docker pgvector；host 5432 被 rag_demo 占用，故映射到 5433）
+docker compose up -d db
+
+# 2. Embedding —— llama.cpp（OpenAI 兼容 /v1）
+#    注意 -c 4096：CUAD 合同存在长 chunk（曾见单 chunk 2570 token），-c 2048 会 400 溢出；
+#    -ub 必须 >= 最长 chunk token 数（embedding 单序列需装进一个 ubatch）；-np 1 省 8GB 显存。
+llama.cpp/llama-server.exe -m llama.cpp/models/Qwen3-Embedding-0.6B-f16.gguf \
+    --embedding --pooling last -ngl 99 -c 4096 -b 4096 -ub 4096 -np 1 --host 127.0.0.1 --port 8081
+
+# 3. Reranker —— llama.cpp 原生 reranking（无需 torch/FlagEmbedding）
+#    GGUF: gpustack/bge-reranker-v2-m3-GGUF（bge-reranker-v2-m3-FP16.gguf, ~1.1GB）
+llama.cpp/llama-server.exe -m llama.cpp/models/bge-reranker-v2-m3-FP16.gguf \
+    --reranking --pooling rank -ngl 99 -c 4096 -b 4096 -ub 4096 -np 1 --host 127.0.0.1 --port 6006
+
+# 4. 换模型后必须清旧向量缓存并重灌（否则新旧模型向量混用）
+uv run scripts/ingest.py --refresh-cache        # 清 embed_cache.pkl + 重建 chunks 表
+rm -f data/embed_cache_eval.pkl                 # eval 语义相似度用的缓存也要清
+
+# 5. 评估（Langfuse Dataset + Experiment，跨 run 对比）
+uv run scripts/eval_experiment.py --sync-dataset --limit 30 --run-name local-noreranker
+uv run scripts/eval_experiment.py --limit 30 --reranker --run-name local-reranker
+
+# 6. 在线问答（同时验证 Langfuse trace 树）
+uv run scripts/serve.py                          # http://127.0.0.1:6800/ui
+```
+
+**关键约束：**
+- **reranker 接口差异**：llama.cpp reranking 返回 `relevance_score`，TEI 返回 `score`——`reranker.py` 的 `direct` provider 已兼容两者。`config.yaml` 用 `provider: direct`。（另有 `macrolens` provider 兼容 MacroLens `cloud_server` 的 `/rerank {query,documents}→{scores}`。）
+- **显存**：GPU 仅 8GB，embedding + reranker 两个 llama.cpp 实例约共占 ~5GB；`-ub 8192` 会 CUDA OOM，故用 4096 + `-np 1`。
+- **可观测性**：配 `.env` 的 `LANGFUSE_*` 后，在线问答自动上报 trace 树、`eval_experiment` 上报 Experiment scores；未配则完全 no-op（见 `lex_rag/tracing.py`）。
+
 ## 环境配置
 
 `.env` 需包含（参考 `.env.example`）：
 ```
-EMBED_API_KEY=...      # embedding 服务认证
+EMBED_API_KEY=...      # embedding 服务认证（本地 llama.cpp 可填任意值）
 PG_PASSWORD=...        # PostgreSQL 密码
 GEMINI_API_KEY=...     # Contextual RAG（--contextual 时必须）
+LANGFUSE_PUBLIC_KEY=…  # 可选：LLM 可观测性（留空则 no-op）
+LANGFUSE_SECRET_KEY=…
+LANGFUSE_HOST=https://cloud.langfuse.com
 ```
 
 `config.yaml` 控制所有运行时参数。CLI 参数（`--overlap`、`--table`、`--reranker`）在运行时覆盖 config.yaml，不修改文件。

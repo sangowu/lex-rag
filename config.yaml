@@ -1,7 +1,7 @@
 embedding:
   provider: direct            # direct | ssh_tunnel
   model: Qwen/Qwen3-Embedding-0.6B
-  base_url: http://127.0.0.1:6006/v1
+  base_url: http://127.0.0.1:8081/v1   # 本地 llama.cpp（Qwen3-Embedding-0.6B-f16.gguf）
   batch_size: 16
   max_retries: 2
   retry_backoff_sec: 1.0
@@ -25,17 +25,17 @@ retrieval:
   rerank_top_k: 60            # 送入 reranker 的候选数（>= top_k）
 
 reranker:
-  enabled: false              # true 时 pipeline.query() 自动 rerank
-  provider: direct            # direct | ssh_tunnel
+  enabled: false              # true 时 pipeline.query() 自动 rerank（或用 --reranker 覆盖）
+  provider: direct            # direct(TEI/llama.cpp) | bge_http | macrolens
   model: BAAI/bge-reranker-v2-m3
-  base_url: http://127.0.0.1:6006
+  base_url: http://127.0.0.1:6006   # 本地 llama.cpp reranking（bge-reranker-v2-m3-FP16.gguf）
   batch_size: 8
   max_retries: 3
   retry_backoff_sec: 1.0
 
 database:
   host: localhost
-  port: 5432
+  port: 5433                   # lex_rag 自己的 docker pgvector（host 5432 被 rag_demo 占用）
   name: legal_rag_v1
   user: rag
   table: chunks                # 切换到 chunks_contextual 可对比 contextual RAG 效果

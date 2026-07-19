@@ -17,6 +17,7 @@ from typing import Iterator
 
 from lex_rag.chunking import ChunkWindow
 from lex_rag.config import ContextualConfig
+from lex_rag import tracing
 
 _GENERATE_PROMPT = """\
 You are a legal contract analysis assistant. Answer questions based ONLY on the contract excerpts provided.
@@ -189,6 +190,7 @@ class LegalGenerator:
             response_mime_type="application/json",
             response_schema=_RESPONSE_SCHEMA,
         )
+        gen = tracing.start_generation("gemini.generate", self.cfg.model, prompt)
         for attempt in range(self.cfg.max_retries + 1):
             try:
                 client = self._get_client()
@@ -197,11 +199,16 @@ class LegalGenerator:
                     contents=prompt,
                     config=config,
                 )
+                in_tok, out_tok = tracing.genai_usage(resp)
+                tracing.end_generation(
+                    gen, output=resp.text, input_tokens=in_tok, output_tokens=out_tok
+                )
                 return json.loads(resp.text or "{}")
             except Exception:
                 if attempt < self.cfg.max_retries:
                     time.sleep(self.cfg.retry_backoff_sec * (2 ** attempt))
                 else:
+                    tracing.end_generation(gen, output="<error>")
                     raise
         raise RuntimeError("unreachable")
 
@@ -241,6 +248,9 @@ class LegalGenerator:
 
         t0 = time.perf_counter()
         full_text = ""
+        gen = tracing.start_generation("gemini.generate_stream", self.cfg.model, prompt)
+        in_tok: int | None = None
+        out_tok: int | None = None
 
         # 状态机状态
         # SCAN    — 未找到 "answer": " 前缀
@@ -260,6 +270,12 @@ class LegalGenerator:
             ):
                 token = chunk_resp.text or ""
                 full_text += token
+                # 流式最后一个 chunk 才携带 usage_metadata，逐块覆盖取最终值
+                _in, _out = tracing.genai_usage(chunk_resp)
+                if _in is not None:
+                    in_tok = _in
+                if _out is not None:
+                    out_tok = _out
 
                 if state == "DONE":
                     continue
@@ -296,6 +312,7 @@ class LegalGenerator:
                         yield "".join(out)
 
         except Exception as e:
+            tracing.end_generation(gen, output="<error>")
             yield GenerationResult(
                 question=question, answer="", is_refused=False,
                 latency_ms=(time.perf_counter() - t0) * 1000,
@@ -303,6 +320,9 @@ class LegalGenerator:
             )
             return
 
+        tracing.end_generation(
+            gen, output=full_text, input_tokens=in_tok, output_tokens=out_tok
+        )
         latency_ms = (time.perf_counter() - t0) * 1000
 
         # 用完整响应文本做最终解析（citations、refused 判断）
