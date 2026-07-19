@@ -21,6 +21,7 @@ dependencies = [
     "fastapi>=0.115",             # REST API (scripts/serve.py)
     "uvicorn[standard]>=0.34",   # ASGI server (scripts/serve.py)
     "gradio>=4.44",               # Web UI (scripts/serve.py, mounted at /ui)
+    "langfuse>=3.0",              # LLM 可观测性（失败安全，未配置则 no-op）
 ]
 
 [project.scripts]

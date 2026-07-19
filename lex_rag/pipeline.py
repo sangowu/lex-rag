@@ -4,6 +4,7 @@ from lex_rag.chunking import chunk_text, chunk_parent_child, ChunkWindow
 from lex_rag.embeddings import EmbeddingClient
 from lex_rag.reranker import RerankClient
 from lex_rag.store import VectorStore
+from lex_rag import tracing
 
 
 def _rrf_merge(result_lists: list[list[ChunkWindow]], k: int = 60) -> list[ChunkWindow]:
@@ -112,6 +113,11 @@ class RAGPipeline:
         self._ingest_one(path.stem, path.read_text(encoding="utf-8"))
 
     def query(self, question: str, doc_id: str | None = None, k: int | None = None) -> list[ChunkWindow]:
+        """检索入口。用 span 包裹，使检索与下游生成聚合成同一棵 trace 树。"""
+        with tracing.trace_span("lex_rag.retrieval", question):
+            return self._query_impl(question, doc_id=doc_id, k=k)
+
+    def _query_impl(self, question: str, doc_id: str | None = None, k: int | None = None) -> list[ChunkWindow]:
         k = k or self.cfg.retrieval.top_k
         fetch_k = self.cfg.retrieval.rerank_top_k if self.reranker else k
 

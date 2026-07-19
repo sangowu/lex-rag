@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextvars
 import json
 import shutil
 from pathlib import Path
@@ -26,6 +27,7 @@ from pydantic import BaseModel, Field
 
 from lex_rag._shared import get_generator, get_pipeline
 from lex_rag.generator import GenerationResult
+from lex_rag import tracing
 
 # ---------------------------------------------------------------------------
 # FastAPI 应用
@@ -69,6 +71,16 @@ class QueryResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 def _run_query(req: QueryRequest) -> QueryResponse:
+    """父 span 包裹：检索 + 生成聚合成同一棵 trace 树（未配置 Langfuse 时 no-op）。"""
+    with tracing.trace_span("lex_rag.query", req.question):
+        resp = _run_query_impl(req)
+    # 长进程里 Langfuse 后台批量导出不保证及时；每次请求后显式 flush，
+    # 保证交互式使用/演示时 trace 立即可见（no-op 时零开销）。
+    tracing.flush()
+    return resp
+
+
+def _run_query_impl(req: QueryRequest) -> QueryResponse:
     pipeline = get_pipeline()
     generator = get_generator()
 
@@ -116,20 +128,31 @@ def _run_query(req: QueryRequest) -> QueryResponse:
 # ---------------------------------------------------------------------------
 
 async def _stream_query(req: QueryRequest):
+    """父 span 包裹流式生成；span 跨 await 持续，内部检索/生成聚合成同一棵 trace 树。"""
+    with tracing.trace_span("lex_rag.query", req.question):
+        async for item in _stream_query_impl(req):
+            yield item
+    tracing.flush()  # 流式结束后显式 flush，保证 trace 立即可见
+
+
+async def _stream_query_impl(req: QueryRequest):
     loop = asyncio.get_event_loop()
     pipeline = get_pipeline()
     generator = get_generator()
+
+    # 检索跑在 executor 线程；copy_context 把当前父 span 上下文带过去，保证 trace 正确嵌套
+    ctx = contextvars.copy_context()
 
     if req.agentic:
         from lex_rag.agent import AgenticPipeline
         from lex_rag.config import load_config
         agent = AgenticPipeline(pipeline, load_config().contextual)
         chunks, query_trace = await loop.run_in_executor(
-            None, lambda: agent.query(req.question, doc_id=req.doc_id, k=req.top_k)
+            None, lambda: ctx.run(agent.query, req.question, doc_id=req.doc_id, k=req.top_k)
         )
     else:
         chunks = await loop.run_in_executor(
-            None, lambda: pipeline.query(req.question, k=req.top_k, doc_id=req.doc_id)
+            None, lambda: ctx.run(pipeline.query, req.question, k=req.top_k, doc_id=req.doc_id)
         )
         query_trace = [req.question]
 
@@ -216,10 +239,25 @@ def _ui_query(
     generate_k: int,
     use_agentic: bool,
 ):
+    """父 span 包裹（同步生成器，检索与生成同线程，天然嵌套）。"""
     if not message or not message.strip():
         yield "请输入问题。"
         return
+    with tracing.trace_span("lex_rag.query", message):
+        yield from _ui_query_impl(
+            message, history, doc_id, top_k, generate_k, use_agentic
+        )
+    tracing.flush()  # UI 每次问答后 flush，保证 Langfuse trace 立即可见
 
+
+def _ui_query_impl(
+    message: str,
+    history: list,  # noqa: ARG001 — required by Gradio ChatInterface signature
+    doc_id: str,
+    top_k: int,
+    generate_k: int,
+    use_agentic: bool,
+):
     pipeline = get_pipeline()
     generator = get_generator()
     query_doc_id = doc_id if doc_id and doc_id != _CORPUS_LABEL else None
@@ -420,6 +458,11 @@ if __name__ == "__main__":
     parser.add_argument("--no-ui", action="store_true", help="不挂载 Gradio UI，仅提供 API")
     parser.add_argument("--root-path", default="", help="子路径部署时的前缀（如 ALB 路径路由 /legal-rag）")
     args = parser.parse_args()
+
+    # 启动即加载 .env（含 LANGFUSE_*），确保首个请求的 trace_span 之前 env 已就位，
+    # 否则首次 tracing 调用早于请求内的 load_dotenv，会误判为未配置。
+    from lex_rag.config import load_config
+    load_config()
 
     if not args.no_ui:
         import gradio as gr
