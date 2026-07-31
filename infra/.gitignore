@@ -1,0 +1,26 @@
+# ===========================================================================
+# Terraform —— 这个文件极其重要，不要删
+# ===========================================================================
+
+# 本地下载的 provider 二进制，几百 MB，绝对不能进 git
+.terraform/
+.terraform.lock.hcl.bak
+
+# 【安全红线】state 文件。
+# state 里以【明文】保存资源属性，包括 RDS 密码、私钥、token 等。
+# 哪怕你的 .tf 文件里一个密码都没写，state 里也可能有。
+# 见过太多人把 tfstate 提交到 public repo 然后被扫走凭证。
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+
+# 实际变量值（可能含账号 ID、内网 IP 等）
+*.tfvars
+!*.tfvars.example
+
+# crash log 里也会带敏感信息
+crash.log
+crash.*.log
+
+# plan 的二进制输出，同样含明文
+*.tfplan
