@@ -35,7 +35,7 @@ variable "container_port" {
 }
 
 variable "log_retention_days" {
-  description = "CloudWatch 日志保留天数。默认永不过期会一直烧钱，个人项目 14 天足够"
+  description = "CloudWatch 日志保留天数。默认永不过期会一直烧钱，个人项目 30 天"
   type        = number
-  default     = 14
+  default     = 30
 }
