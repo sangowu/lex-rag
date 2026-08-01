@@ -122,6 +122,7 @@ MinerU `hybrid-auto-engine` on **OmniDocBench** (1615 samples):
 | Serving | FastAPI (async, SSE) + Gradio, single process |
 | OCR | MinerU (`hybrid-auto-engine`), benchmarked on OmniDocBench |
 | Data | CUAD (HuggingFace `theatticusproject/cuad`) |
+| Infrastructure as code | **Terraform** — `import`-based adoption of the existing AWS estate, `plan` as the change gate (see [`infra/`](infra/)) |
 
 ---
 
@@ -239,6 +240,8 @@ lex-rag/
 │   └── config.py            # dataclass config, YAML + .env loader
 ├── scripts/                 # ingest / serve / eval / grid-search / OCR entrypoints
 ├── docs/                    # baseline.md, bug_fixes.md
+├── infra/                   # Terraform (IaC) — CloudWatch log group + ECS task definition
+│                            # under management; RDS/EC2/ALB deliberately out of scope
 ├── config.yaml              # all runtime parameters
 └── CLAUDE.md                # detailed engineering log & full run history
 ```

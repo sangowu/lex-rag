@@ -17,7 +17,8 @@
 
 **2026-07-31 完成首次接入**，结果 `1 imported, 1 added, 1 changed, 0 destroyed`：
 
-- 日志组 `retention_in_days` 由 `0`（永不过期，`awslogs-create-group` 隐式创建的默认值）改为 `14`
+- 日志组 `retention_in_days` 由 `0`（永不过期，`awslogs-create-group` 隐式创建的默认值）改为 `14`；
+  后于 2026-08-01 调整为 `30`（PR #3），理由见该 PR：按排障回溯需求而非成本选值
 - Task definition 生成 `legal-rag-v1:3`；**ECS service 未切换，仍运行 `:2`**
 - 此后 `terraform plan` 应稳定输出 `No changes`
 
