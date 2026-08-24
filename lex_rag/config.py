@@ -82,7 +82,7 @@ class ParentChildConfig:
 
 @dataclass
 class RagasConfig:
-    model: str = "gemini-2.0-flash"
+    model: str = "gemini-3.5-flash-lite"
     api_key: str = ""
     rpm_limit: int = 60
 
@@ -176,7 +176,7 @@ def load_config(config_path: Path | None = None) -> AppConfig:
     ctx = config_dict.get("contextual", {})
     contextual_config = ContextualConfig(
         enabled=ctx.get("enabled", False),
-        model=ctx.get("model", "gemini-2.0-flash"),
+        model=ctx.get("model", "gemini-3.5-flash-lite"),
         api_key=os.environ.get("GEMINI_API_KEY", ""),
         rpm_limit=ctx.get("rpm_limit", 60),
         max_retries=ctx.get("max_retries", 3),
@@ -198,7 +198,7 @@ def load_config(config_path: Path | None = None) -> AppConfig:
 
     rg = config_dict.get("ragas", {})
     ragas_config = RagasConfig(
-        model=rg.get("model", "gemini-2.0-flash"),
+        model=rg.get("model", "gemini-3.5-flash-lite"),
         api_key=os.environ.get("GEMINI_API_KEY", ""),
         rpm_limit=rg.get("rpm_limit", 60),
     )
