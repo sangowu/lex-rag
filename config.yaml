@@ -1,9 +1,9 @@
 embedding:
-  provider: direct            # direct | ssh_tunnel
-  model: Qwen/Qwen3-Embedding-0.6B
-  # TODO: 填模型提供商的 embedding endpoint。**必须带 /v1**（OpenAI SDK 自己拼 /embeddings）。
-  # 故意留成无法解析的占位值：置空会让 OpenAI SDK 回落到官方 api.openai.com，静默走错服务。
-  base_url: http://REPLACE-ME-embedding-endpoint/v1
+  provider: direct            # direct | ssh_tunnel | bge_http
+  model: BAAI/bge-m3          # 1024 维，与 chunks.embedding vector(1024) 一致
+  # SiliconFlow，OpenAI 兼容。**必须带 /v1**（OpenAI SDK 自己拼 /embeddings）。
+  # 不要置空：空 base_url 会让 OpenAI SDK 回落到官方 api.openai.com，静默走错服务。
+  base_url: https://api.siliconflow.cn/v1
   batch_size: 16
   max_retries: 2
   retry_backoff_sec: 1.0
@@ -30,10 +30,10 @@ reranker:
   enabled: false              # true 时 pipeline.query() 自动 rerank（或用 --reranker 覆盖）
   provider: direct            # direct(TEI 风格 /v1/rerank) | bge_http | macrolens
   model: BAAI/bge-reranker-v2-m3
-  # TODO: 填模型提供商的 reranker endpoint。与 embedding 同一服务商时填同一个 host。
-  # 后缀与 embedding 相反：这里**不带 /v1**（reranker.py 自己拼 /v1/rerank；写了也会被容错去掉）。
-  # 认证用 .env 的 RERANK_API_KEY，未设置则回落到 EMBED_API_KEY（同一服务商时只配后者即可）。
-  base_url: http://REPLACE-ME-reranker-endpoint
+  # SiliconFlow，与 embedding 同一 host。写不写结尾的 /v1 都可以：
+  # reranker.py 自己拼 /v1/rerank，多余的 /v1 会被容错去掉。
+  # 认证用 .env 的 RERANK_API_KEY，未设置则回落到 EMBED_API_KEY。
+  base_url: https://api.siliconflow.cn/v1
   batch_size: 8
   max_retries: 3
   retry_backoff_sec: 1.0

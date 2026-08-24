@@ -1,7 +1,7 @@
 embedding:
-  provider: bge_http           # custom BGE-M3 server on the reused rag-embedding-server EC2 instance
+  provider: direct             # SiliconFlow, OpenAI-compatible (the GPU EC2 instance is gone)
   model: BAAI/bge-m3
-  base_url: http://172.31.30.33:8000   # GPU server's private IP (same VPC, no tunnel needed)
+  base_url: https://api.siliconflow.cn/v1
   batch_size: 16
   max_retries: 2
   retry_backoff_sec: 1.0
@@ -25,9 +25,9 @@ retrieval:
 
 reranker:
   enabled: true
-  provider: bge_http           # same custom BGE-reranker-v2-m3 server
+  provider: direct             # SiliconFlow, same host as embedding
   model: BAAI/bge-reranker-v2-m3
-  base_url: http://172.31.30.33:8000
+  base_url: https://api.siliconflow.cn/v1
   batch_size: 8
   max_retries: 3
   retry_backoff_sec: 1.0
