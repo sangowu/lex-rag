@@ -1,0 +1,78 @@
+name: Build and Deploy
+
+# 触发条件与 test.yml 保持一致（push 到 master）。
+# ECR_REPOSITORY / task family 名与 infra/variables.tf 的 service_name 默认值
+# （legal-rag-v1）保持一致，CONTAINER_NAME 与 deploy/task-definition.json 里
+# containerDefinitions[0].name 一致。
+#
+# 注意：ECS_CLUSTER / ECS_SERVICE 当前是占位名——集群和服务已被手动下线以节省
+# AWS 费用，重新用 Terraform（infra/）建好集群和 service 后，把这两个改成真实
+# 名字（或在仓库 Settings → Variables 里覆盖），这个 workflow 才能真正跑通。
+on:
+  push:
+    branches: [master]
+
+env:
+  AWS_REGION: eu-west-1
+  ECR_REPOSITORY: legal-rag-v1
+  ECS_CLUSTER: legal-rag-v1-cluster
+  ECS_SERVICE: legal-rag-v1-service
+  CONTAINER_NAME: legal-rag-v1
+
+jobs:
+  deploy:
+    name: Build, Push, Deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push image to ECR
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+      - name: Register new task definition revision
+        id: task-def
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          NEW_TASK_DEF=$(aws ecs describe-task-definition \
+            --task-definition $ECR_REPOSITORY \
+            --query 'taskDefinition' --output json \
+            | jq --arg IMAGE "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" \
+              '.containerDefinitions[0].image = $IMAGE
+               | del(.taskDefinitionArn, .revision, .status, .requiresAttributes,
+                     .compatibilities, .registeredAt, .registeredBy)')
+          echo "$NEW_TASK_DEF" > new-task-def.json
+          NEW_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file://new-task-def.json \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+          echo "task_def_arn=$NEW_ARN" >> $GITHUB_OUTPUT
+
+      - name: Update ECS service
+        run: |
+          aws ecs update-service \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --service ${{ env.ECS_SERVICE }} \
+            --task-definition ${{ steps.task-def.outputs.task_def_arn }} \
+            --force-new-deployment \
+            --region ${{ env.AWS_REGION }}
