@@ -47,7 +47,7 @@ evaluation:
 
 contextual:
   enabled: false              # true 时 ingest 阶段为每个 chunk 调用 Gemini 生成上下文前缀
-  model: gemini-3.1-flash-lite
+  model: glm-4.7-flash
   rpm_limit: 120               # 免费层 15，付费层最高 2000；控制 API 调用频率
   max_retries: 3
   retry_backoff_sec: 2.0      # 指数退避基数（秒）
@@ -66,5 +66,5 @@ parent_child:
   overlap: 50                  # child 之间的 overlap
 
 ragas:
-  model: gemini-3.5-flash        # judge 模型，建议强于 generation 模型
+  model: glm-4.7-flash        # judge 模型，建议强于 generation 模型
   rpm_limit: 60                  # RAGAS 每轮评估会多次调用 LLM，注意限速

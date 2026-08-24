@@ -1,4 +1,4 @@
-"""Unit tests for LegalGenerator's refusal-gate parsing logic (Gemini call mocked out)."""
+"""Unit tests for LegalGenerator's refusal-gate parsing logic (LLM call mocked out)."""
 
 from unittest.mock import MagicMock
 
@@ -10,7 +10,7 @@ from lex_rag.generator import LegalGenerator
 def _cfg() -> ContextualConfig:
     return ContextualConfig(
         enabled=True,
-        model="gemini-test",
+        model="model-under-test",
         api_key="key",
         rpm_limit=60,
         max_retries=0,
@@ -100,9 +100,9 @@ def test_generate_refuses_immediately_when_no_chunks_retrieved():
     assert result.error == "no chunks retrieved"
 
 
-def test_generate_parses_call_gemini_result_into_citations():
+def test_generate_parses_llm_result_into_citations():
     gen = LegalGenerator(_cfg())
-    gen._call_gemini = MagicMock(return_value={"refused": False, "answer": 'Yes "clause" [1].'})
+    gen._call_llm = MagicMock(return_value={"refused": False, "answer": 'Yes "clause" [1].'})
     chunks = [_chunk("c1", "doc1", "clause text")]
 
     result = gen.generate("question?", chunks)
@@ -113,9 +113,9 @@ def test_generate_parses_call_gemini_result_into_citations():
     assert result.error is None
 
 
-def test_generate_returns_error_result_when_call_gemini_raises():
+def test_generate_returns_error_result_when_llm_call_raises():
     gen = LegalGenerator(_cfg())
-    gen._call_gemini = MagicMock(side_effect=RuntimeError("boom"))
+    gen._call_llm = MagicMock(side_effect=RuntimeError("boom"))
     chunks = [_chunk("c1", "doc1", "clause text")]
 
     result = gen.generate("question?", chunks)

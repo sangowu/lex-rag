@@ -66,6 +66,10 @@ class EvalConfig:
 
 @dataclass
 class ContextualConfig:
+    """生成层与所有辅助 LLM 任务（contextual / HyDE / multi-query / meta 提取）共用。
+
+    ``enabled`` 只控制 ingest 阶段的 Contextual RAG；生成、HyDE 等不看这个字段。
+    """
     enabled: bool
     model: str
     api_key: str
@@ -73,6 +77,7 @@ class ContextualConfig:
     max_retries: int
     retry_backoff_sec: float
     section_chars: int = 3000  # HierarchicalContextualizer 的 section 切分大小
+    base_url: str = "https://api.z.ai/api/paas/v4/"  # OpenAI 兼容 endpoint
 
 @dataclass
 class ParentChildConfig:
@@ -82,9 +87,10 @@ class ParentChildConfig:
 
 @dataclass
 class RagasConfig:
-    model: str = "gemini-3.5-flash-lite"
+    model: str = "glm-4.7-flash"
     api_key: str = ""
     rpm_limit: int = 60
+    base_url: str = "https://api.z.ai/api/paas/v4/"
 
 @dataclass
 class AppConfig:
@@ -176,12 +182,13 @@ def load_config(config_path: Path | None = None) -> AppConfig:
     ctx = config_dict.get("contextual", {})
     contextual_config = ContextualConfig(
         enabled=ctx.get("enabled", False),
-        model=ctx.get("model", "gemini-3.5-flash-lite"),
-        api_key=os.environ.get("GEMINI_API_KEY", ""),
+        model=ctx.get("model", "glm-4.7-flash"),
+        api_key=os.environ.get("GENERATE_MODEL_API", ""),
         rpm_limit=ctx.get("rpm_limit", 60),
         max_retries=ctx.get("max_retries", 3),
         retry_backoff_sec=ctx.get("retry_backoff_sec", 2.0),
         section_chars=ctx.get("section_chars", 3000),
+        base_url=ctx.get("base_url", "https://api.z.ai/api/paas/v4/"),
     )
 
     pc = config_dict.get("parent_child", {})
@@ -198,9 +205,10 @@ def load_config(config_path: Path | None = None) -> AppConfig:
 
     rg = config_dict.get("ragas", {})
     ragas_config = RagasConfig(
-        model=rg.get("model", "gemini-3.5-flash-lite"),
-        api_key=os.environ.get("GEMINI_API_KEY", ""),
+        model=rg.get("model", "glm-4.7-flash"),
+        api_key=os.environ.get("GENERATE_MODEL_API", ""),
         rpm_limit=rg.get("rpm_limit", 60),
+        base_url=rg.get("base_url", "https://api.z.ai/api/paas/v4/"),
     )
 
     return AppConfig(

@@ -46,7 +46,7 @@ evaluation:
 
 contextual:
   enabled: false
-  model: gemini-3.1-flash-lite
+  model: glm-4.7-flash
   rpm_limit: 120
   max_retries: 3
   retry_backoff_sec: 2.0
@@ -65,5 +65,5 @@ parent_child:
   overlap: 50
 
 ragas:
-  model: gemini-3.5-flash
+  model: glm-4.7-flash
   rpm_limit: 60

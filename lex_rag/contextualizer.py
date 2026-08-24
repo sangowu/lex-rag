@@ -16,6 +16,7 @@ from pathlib import Path
 
 from lex_rag.chunking import ChunkWindow
 from lex_rag.config import ContextualConfig
+from lex_rag.llm import ChatClient
 
 _PROMPT = """\
 <document>
@@ -36,8 +37,8 @@ _DEFAULT_CACHE = Path(".cache/contextual.json")
 
 class ContextualClient:
     def __init__(self, cfg: ContextualConfig, cache_path: Path = _DEFAULT_CACHE):
-        from google import genai  # 懒加载：仅在 contextual 开启时才引入，避免污染其他脚本的日志
-        self._client = genai.Client(api_key=cfg.api_key)
+        # max_retries=0：本类自己有重试循环，交给 ChatClient 再重试会变成 (n+1)² 次请求
+        self._chat = ChatClient.from_config(cfg, max_retries=0)
         self.cfg = cfg
         self.cache_path = cache_path
         self._cache: dict[str, str] = self._load_cache()
@@ -56,19 +57,15 @@ class ContextualClient:
         h = hashlib.md5(chunk.text.encode()).hexdigest()[:8]
         return f"{chunk.chunk_id}:{h}"
 
-    def _call_gemini(self, prompt: str) -> str:
+    def _call_llm(self, prompt: str) -> str:
         for attempt in range(self.cfg.max_retries + 1):
             try:
-                resp = self._client.models.generate_content(
-                    model=self.cfg.model,
-                    contents=prompt,
-                )
-                return resp.text.strip()
+                return self._chat.complete(prompt, trace_name="contextual.generate")
             except Exception as exc:
                 if attempt < self.cfg.max_retries:
                     time.sleep(self.cfg.retry_backoff_sec * (2 ** attempt))
                 else:
-                    raise RuntimeError(f"Gemini API failed after {attempt + 1} attempts") from exc
+                    raise RuntimeError(f"LLM 调用失败，已重试 {attempt + 1} 次") from exc
 
     def contextualize(self, doc_text: str, chunks: list[ChunkWindow]) -> list[ChunkWindow]:
         """为一个文档的所有 chunk 生成上下文前缀，返回新的 ChunkWindow 列表。"""
@@ -88,7 +85,7 @@ class ContextualClient:
                     time.sleep(self._min_interval - elapsed)
 
                 prompt = _PROMPT.format(doc_text=doc_text, chunk_text=chunk.text)
-                context = self._call_gemini(prompt)
+                context = self._call_llm(prompt)
                 last_call_time = time.monotonic()
 
                 self._cache[key] = context
@@ -140,8 +137,7 @@ class HierarchicalContextualizer:
 
     def __init__(self, cfg: ContextualConfig,
                  cache_path: Path = _HIER_CACHE):
-        from google import genai
-        self._client = genai.Client(api_key=cfg.api_key)
+        self._chat = ChatClient.from_config(cfg, max_retries=0)  # 重试由本类的循环负责
         self.cfg = cfg
         self.cache_path = cache_path
         self._cache: dict[str, str] = self._load_cache()
@@ -184,18 +180,15 @@ class HierarchicalContextualizer:
                 return sec
         return sections[-1]
 
-    def _call_gemini(self, prompt: str) -> str:
+    def _call_llm(self, prompt: str) -> str:
         for attempt in range(self.cfg.max_retries + 1):
             try:
-                resp = self._client.models.generate_content(
-                    model=self.cfg.model, contents=prompt,
-                )
-                return resp.text.strip()
+                return self._chat.complete(prompt, trace_name="contextual.section")
             except Exception as exc:
                 if attempt < self.cfg.max_retries:
                     time.sleep(self.cfg.retry_backoff_sec * (2 ** attempt))
                 else:
-                    raise RuntimeError(f"Gemini API failed after {attempt + 1} attempts") from exc
+                    raise RuntimeError(f"LLM 调用失败，已重试 {attempt + 1} 次") from exc
 
     def contextualize(self, doc_text: str, chunks: list[ChunkWindow]) -> list[ChunkWindow]:
         if not chunks:
@@ -215,7 +208,7 @@ class HierarchicalContextualizer:
                 if elapsed < self._min_interval:
                     time.sleep(self._min_interval - elapsed)
                 prompt = _SECTION_PROMPT.format(doc_text=doc_text, section_text=sec.text)
-                summary = self._call_gemini(prompt)
+                summary = self._call_llm(prompt)
                 last_call_time = time.monotonic()
                 self._cache[key] = summary
                 section_summaries[sec.chunk_id] = summary
@@ -271,13 +264,12 @@ _META_CACHE = Path(".cache/meta_extract.json")
 
 class MetadataExtractor:
     """
-    每文档调用 Gemini 一次，提取结构化 metadata，存入 doc_meta 表。
+    每文档调用 LLM 一次，提取结构化 metadata，存入 doc_meta 表。
     JSON 解析失败时降级为空 meta（不抛异常，不影响主 ingest 流程）。
     """
 
     def __init__(self, cfg: ContextualConfig, cache_path: Path = _META_CACHE):
-        from google import genai
-        self._client = genai.Client(api_key=cfg.api_key)
+        self._chat = ChatClient.from_config(cfg, max_retries=0)  # 重试由本类的循环负责
         self.cfg = cfg
         self.cache_path = cache_path
         self._cache: dict[str, dict] = self._load_cache()
@@ -320,10 +312,7 @@ class MetadataExtractor:
         meta = self._empty_meta()
         for attempt in range(self.cfg.max_retries + 1):
             try:
-                resp = self._client.models.generate_content(
-                    model=self.cfg.model, contents=prompt,
-                )
-                raw = resp.text.strip()
+                raw = self._chat.complete(prompt, trace_name="meta.extract")
                 self._last_call_time = time.monotonic()
                 # 去除可能的 markdown 代码块包装
                 if raw.startswith("```"):
@@ -361,12 +350,11 @@ _HYDE_CACHE = Path(".cache/hyde.json")
 class HyDEClient:
     """
     查询阶段：将自然语言问题转换为假设合同条款文本，再交由 embedding 模型处理。
-    结果缓存在 .cache/hyde.json，相同问题不重复调用 Gemini。
+    结果缓存在 .cache/hyde.json，相同问题不重复调用 LLM。
     """
 
     def __init__(self, cfg: ContextualConfig, cache_path: Path = _HYDE_CACHE):
-        from google import genai
-        self._client = genai.Client(api_key=cfg.api_key)
+        self._chat = ChatClient.from_config(cfg, max_retries=0)  # 重试由本类的循环负责
         self.cfg = cfg
         self.cache_path = cache_path
         self._cache: dict[str, str] = self._load_cache()
@@ -388,7 +376,7 @@ class HyDEClient:
         return hashlib.md5(question.encode()).hexdigest()
 
     def generate(self, question: str) -> str:
-        """返回假设合同条款文本；命中缓存时直接返回，不调用 Gemini。"""
+        """返回假设合同条款文本；命中缓存时直接返回，不调用 LLM。"""
         key = self._cache_key(question)
         if key in self._cache:
             return self._cache[key]
@@ -400,10 +388,7 @@ class HyDEClient:
         prompt = _HYDE_PROMPT.format(question=question)
         for attempt in range(self.cfg.max_retries + 1):
             try:
-                resp = self._client.models.generate_content(
-                    model=self.cfg.model, contents=prompt,
-                )
-                hypo = resp.text.strip()
+                hypo = self._chat.complete(prompt, trace_name="hyde.generate")
                 self._last_call_time = time.monotonic()
                 break
             except Exception:
@@ -436,13 +421,12 @@ _EXPAND_CACHE = Path(".cache/query_expand.json")
 class QueryExpander:
     """
     查询阶段：将一个问题改写为 N 个变体，用于 Multi-Query 检索。
-    结果缓存在 .cache/query_expand.json，相同问题不重复调用 Gemini。
+    结果缓存在 .cache/query_expand.json，相同问题不重复调用 LLM。
     """
 
     def __init__(self, cfg: ContextualConfig, n: int = 3,
                  cache_path: Path = _EXPAND_CACHE):
-        from google import genai
-        self._client = genai.Client(api_key=cfg.api_key)
+        self._chat = ChatClient.from_config(cfg, max_retries=0)  # 重试由本类的循环负责
         self.cfg = cfg
         self.n = n
         self.cache_path = cache_path
@@ -481,10 +465,7 @@ class QueryExpander:
         variants = [question]
         for attempt in range(self.cfg.max_retries + 1):
             try:
-                resp = self._client.models.generate_content(
-                    model=self.cfg.model, contents=prompt,
-                )
-                raw = resp.text.strip()
+                raw = self._chat.complete(prompt, trace_name="multiquery.expand")
                 self._last_call_time = time.monotonic()
                 if raw.startswith("```"):
                     lines = raw.split("\n")
