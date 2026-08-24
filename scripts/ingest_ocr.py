@@ -3,7 +3,7 @@ OCR → RAG 端到端 ingest 脚本。
 
 流程：
   1. 遍历输入目录中的 PDF / 图像文件
-  2. 每个文件 POST 到 MinerU /file_parse，获取 Markdown
+  2. 按批交给 MinerU 在线 API 解析成 Markdown
   3. 将 Markdown 文本直接送入 RAGPipeline._ingest_one()
      （chunking → embedding → pgvector，与 ingest.py 完全相同的路径）
 
@@ -12,98 +12,23 @@ OCR → RAG 端到端 ingest 脚本。
     uv run scripts/ingest_ocr.py --input-dir data/scanned_docs --table chunks_ocr
     uv run scripts/ingest_ocr.py --input-dir data/scanned_docs --table chunks_ocr --no-truncate
 
-支持格式：PDF、PNG、JPG、JPEG、TIFF、BMP
+支持格式：PDF、PNG、JPG、JPEG、TIFF、BMP（TIFF 线上未列入支持列表，会被跳过并提示）
+
+前置：.env 里设置 MINERU_API_TOKEN
 
 依赖（本地）：httpx tqdm
-远端：MinerU API（通过 SSH 隧道或直连）
 """
 from __future__ import annotations
 
-import time
 from dataclasses import replace
 from pathlib import Path
 
-import httpx
+from dotenv import load_dotenv
 from tqdm import tqdm
 
-SUPPORTED_EXTS = {".pdf", ".png", ".jpg", ".jpeg", ".tiff", ".tif", ".bmp"}
+from lex_rag import ocr
 
-MIME = {
-    ".pdf":  "application/pdf",
-    ".png":  "image/png",
-    ".jpg":  "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".tiff": "image/tiff",
-    ".tif":  "image/tiff",
-    ".bmp":  "image/bmp",
-}
-
-
-# ---------------------------------------------------------------------------
-# MinerU 调用（复用 eval_ocr 的逻辑）
-# ---------------------------------------------------------------------------
-
-def _extract_markdown(resp_json: dict) -> str:
-    results = resp_json.get("results", {})
-    if isinstance(results, dict):
-        for file_result in results.values():
-            if isinstance(file_result, dict):
-                v = file_result.get("md_content", "")
-                if v:
-                    return "\n".join(v) if isinstance(v, list) else str(v)
-    return ""
-
-
-def ocr_file(path: Path, api_url: str, client: httpx.Client,
-             lang: str = "ch", backend: str = "hybrid-auto-engine") -> str:
-    """将单个文件发送给 MinerU，返回 Markdown 文本。"""
-    ext = path.suffix.lower()
-    mime = MIME.get(ext, "application/octet-stream")
-    file_bytes = path.read_bytes()
-
-    if backend == "vlm":
-        files = [
-            ("files",    (path.name, file_bytes, mime)),
-            ("backend",  (None, "vlm")),
-            ("return_md", (None, "true")),
-        ]
-    else:
-        files = [
-            ("files",               (path.name, file_bytes, mime)),
-            ("backend",             (None, backend)),
-            ("lang_list",           (None, lang)),
-            ("parse_method",        (None, "ocr")),
-            ("formula_enable",      (None, "false")),
-            ("table_enable",        (None, "true")),
-            ("image_analysis",      (None, "false")),
-            ("return_md",           (None, "true")),
-            ("return_middle_json",  (None, "false")),
-            ("return_model_output", (None, "false")),
-            ("return_content_list", (None, "false")),
-            ("return_images",       (None, "false")),
-            ("response_format_zip", (None, "false")),
-        ]
-
-    url = f"{api_url.rstrip('/')}/file_parse"
-    for attempt in range(5):
-        resp = client.post(url, files=files)
-        if resp.status_code == 409:
-            time.sleep(3 * (attempt + 1))
-            continue
-        resp.raise_for_status()
-        rj = resp.json()
-        md = _extract_markdown(rj)
-        if md:
-            return md
-        result_url = rj.get("result_url")
-        if result_url:
-            time.sleep(5)
-            md = _extract_markdown(client.get(result_url).json())
-            if md:
-                return md
-        return md
-    resp.raise_for_status()
-    return ""
+SUPPORTED_EXTS = {".pdf", ".png", ".jpg", ".jpeg", ".jp2", ".webp", ".gif", ".bmp"}
 
 
 # ---------------------------------------------------------------------------
@@ -120,20 +45,18 @@ def main() -> None:
     )
     parser.add_argument("--input-dir",  required=True,
                         help="包含 PDF/图像文件的目录")
-    parser.add_argument("--api-url",    default="http://127.0.0.1:6006",
-                        help="MinerU API 地址")
-    parser.add_argument("--backend",    default="hybrid-auto-engine",
-                        choices=["pipeline", "hybrid-auto-engine", "vlm"],
-                        help="MinerU 解析后端（默认 hybrid-auto-engine）")
-    parser.add_argument("--lang",       default="ch",
-                        help="OCR 语言（默认 ch）")
+    parser.add_argument("--batch-size", type=int, default=20,
+                        help="每批提交给在线 API 的文件数（官方单批上限 200）")
     parser.add_argument("--table",      default=None,
                         help="目标 pgvector 表名（默认由 config.yaml 决定）")
     parser.add_argument("--no-truncate", action="store_true",
                         help="不清空现有数据，增量追加")
     parser.add_argument("--contextual",  action="store_true",
                         help="为每个 chunk 调用 Gemini 生成上下文前缀")
+    ocr.add_ocr_args(parser)
     args = parser.parse_args()
+    args.batch_size = max(1, min(args.batch_size, ocr.MAX_BATCH_FILES))
+    load_dotenv()          # MINERU_API_TOKEN
 
     input_dir = Path(args.input_dir)
     if not input_dir.exists():
@@ -161,21 +84,32 @@ def main() -> None:
             print(f"清空表 {cfg.database.table} ...")
             pipeline.store.truncate()
 
-        with httpx.Client(timeout=httpx.Timeout(300.0), follow_redirects=True) as client:
-            health = client.get(f"{args.api_url.rstrip('/')}/health")
-            health.raise_for_status()
-            print(f"MinerU API: {args.api_url}  version={health.json().get('version', '?')}")
+        opts = ocr.options_from_args(args)
+        print(f"MinerU 在线 API: {ocr.MINERU_API_BASE}  model_version={opts.model_version}")
 
-            for path in tqdm(files, desc="OCR → Ingest"):
+        with (
+            ocr.MinerUCloudClient(options=opts) as client,
+            tqdm(total=len(files), desc="OCR → Ingest") as bar,
+        ):
+            for start_i in range(0, len(files), args.batch_size):
+                batch = files[start_i:start_i + args.batch_size]
                 try:
-                    md = ocr_file(path, args.api_url, client,
-                                  lang=args.lang, backend=args.backend)
-                    if not md.strip():
-                        tqdm.write(f"  ⚠️ OCR 返回空内容，跳过：{path.name}")
-                        continue
-                    pipeline._ingest_one(path.stem, md)
+                    mds = client.parse_paths(batch)
                 except Exception as e:
-                    tqdm.write(f"  ⚠️ 失败（{path.name}）：{e}")
+                    bar.write(f"  ⚠️ 批次 {start_i}~{start_i + len(batch)} 整批失败：{e}")
+                    bar.update(len(batch))
+                    continue
+
+                # ingest 逐个做：单个文档 chunk/embed 失败不该拖掉整批 OCR 结果
+                for path, md in zip(batch, mds):
+                    try:
+                        if not md.strip():
+                            bar.write(f"  ⚠️ OCR 返回空内容，跳过：{path.name}")
+                            continue
+                        pipeline._ingest_one(path.stem, md)
+                    except Exception as e:
+                        bar.write(f"  ⚠️ ingest 失败（{path.name}）：{e}")
+                bar.update(len(batch))
 
         pipeline.store.save_meta(
             chunk_chars=cfg.chunking.chunk_chars,

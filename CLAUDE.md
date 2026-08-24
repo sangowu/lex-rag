@@ -45,21 +45,18 @@ uv run scripts/serve.py --no-ui            # 仅 API，不挂载 Gradio
 # 依赖安装
 uv pip install -e .
 
-# OCR 服务（在远端 GPU 服务器上运行，需提前安装 MinerU）
-python scripts/start_ocr_service.py                    # 默认 host=127.0.0.1 port=1080
-python scripts/start_ocr_service.py --host 0.0.0.0    # 对外监听
-
-# OCR 评测（本地运行，需 SSH 隧道已建立）
-uv run scripts/eval_ocr.py --api-url http://127.0.0.1:6006 --limit 50
-uv run scripts/eval_ocr.py --api-url http://127.0.0.1:6006 --limit 1651          # 全量
-uv run scripts/eval_ocr.py --api-url http://127.0.0.1:6006 --limit 100 --doc-types academic_literature,research_report
-uv run scripts/eval_ocr.py --api-url http://127.0.0.1:6006 --limit 1651 --samples-per-type 5  # 固定测试集（每类5样本）
+# OCR 评测（走 MinerU 在线 API，需 .env 里的 MINERU_API_TOKEN）
+uv run scripts/eval_ocr.py --limit 50
+uv run scripts/eval_ocr.py --limit 1651                      # 全量（会超出每日高优先级额度，见下）
+uv run scripts/eval_ocr.py --limit 100 --doc-types academic_literature,research_report
+uv run scripts/eval_ocr.py --limit 1651 --samples-per-type 5  # 固定测试集（每类5样本）
+uv run scripts/eval_ocr.py --limit 200 --model-version vlm --batch-size 100
 
 # OCR review（每类1样本对比 GT 与识别结果，输出 Markdown）
-uv run scripts/review_ocr.py --api-url http://127.0.0.1:6006
+uv run scripts/review_ocr.py
 
 # OCR → RAG 端到端 ingest（扫描件目录 → pgvector）
-uv run scripts/ingest_ocr.py --input-dir data/scanned_docs --api-url http://127.0.0.1:6006
+uv run scripts/ingest_ocr.py --input-dir data/scanned_docs
 uv run scripts/ingest_ocr.py --input-dir data/scanned_docs --table chunks_ocr --no-truncate  # 增量追加
 ```
 
@@ -101,6 +98,7 @@ uv run scripts/serve.py                          # http://127.0.0.1:6800/ui
 ```
 EMBED_API_KEY=...      # embedding 服务认证
 PG_PASSWORD=...        # PostgreSQL 密码
+MINERU_API_TOKEN=...   # MinerU 在线 API（OCR 相关脚本必须）
 GEMINI_API_KEY=...     # Contextual RAG（--contextual 时必须）
 LANGFUSE_PUBLIC_KEY=…  # 可选：LLM 可观测性（留空则 no-op）
 LANGFUSE_SECRET_KEY=…
@@ -143,11 +141,12 @@ question → embeddings.py → store.py（vector / bm25 / hybrid RRF）
 ### OCR 管道（独立，未接入 RAG）
 
 ```
-eval_ocr.py（本地）
-  → POST /file_parse（PNG 直传，MinerU 原生支持图像输入）
-      → SSH 隧道（本地端口 → 远端 127.0.0.1:1080）
-          → start_ocr_service.py（GPU 服务器，mineru-api FastAPI）
-              → hybrid-auto-engine backend（小 VLM 辅助识别）→ Markdown
+eval_ocr.py（本地，按 --batch-size 成批）
+  → lex_rag/ocr.py  MinerUCloudClient
+      ① POST /api/v4/file-urls/batch   申请预签名上传链接（batch_id + file_urls）
+      ② PUT  file_urls[i]              PNG 直传 OSS（不带 Authorization、不设 Content-Type）
+      ③ GET  /api/v4/extract-results/batch/{batch_id}   轮询到 state=done
+      ④ GET  full_zip_url              下载 zip，取出 full.md
   → OmniDocBench ground truth 对比 → CER / WER
 ```
 
@@ -157,11 +156,18 @@ eval_ocr.py（本地）
 - GT 文本来源：`layout_dets[*].text`，过滤 `TEXT_CATS = {text_block, header, figure_caption, table_caption, page_footer, page_header}`
 - 指标：CER（字符错误率）/ WER（词错误率），CER > 1.0 表示 OCR 输出远长于 GT
 
-**OCR 服务端口：** 与 embedding 服务共用端口 1080，不同时运行。SSH 隧道本地端口 6006 → 远端 1080。
+**MinerU 在线 API 约束（截至 2026-08）：**
+- 免费额度：每账号每天 1000 页最高优先级（另一处文档写 2000），**超出只降优先级、不拒绝**——
+  全量 1651 张一次跑完会有后半程明显变慢，做延迟对比时要用小测试集。
+- 单文件 ≤200MB / ≤200 页；单批 ≤200 个文件；上传链接有效期 24 小时。
+- 官方定位是"内测 + 免费试用"，没有 SLA、没有公开价目表，商用授权需单独确认。
 
 **本地依赖：** `editdistance datasets pillow httpx tqdm`（无需安装 mineru）
 
-**OCR Baseline（hybrid-auto-engine，Run: `20260602T042922Z`，全量 1615 样本）：**
+**OCR Baseline（⚠️ 本地自建服务时期的历史数字，Run: `20260602T042922Z`，全量 1615 样本）：**
+
+> 线上 API 没有 `backend` / `parse_method` 参数（只有 `model_version` + `is_ocr`），
+> 下表与线上结果**不可直接比较**，切换后需要重跑基线。
 
 | 类型 | CER | WER | vs pipeline |
 |------|-----|-----|-------------|
@@ -176,7 +182,7 @@ eval_ocr.py（本地）
 | newspaper | 0.29% | 0.88% | CER ▼0.39 |
 | **Overall** | **7.35%** | **9.22%** | **CER ▼2.75** |
 
-配置：`hybrid-auto-engine` + `parse_method=ocr` + `formula_enable=false` + `table_enable=true`；需修复 `libnvrtc-builtins.so.13.0` 软链接（实际库为 CUDA 12.8）。`research_report` 主要瓶颈为多栏布局乱序（WER 远高于 CER），非字符识别问题。
+配置：`hybrid-auto-engine` + `parse_method=ocr` + `formula_enable=false` + `table_enable=true`（自建 mineru-api，已下线）。`research_report` 主要瓶颈为多栏布局乱序（WER 远高于 CER），非字符识别问题。
 
 ### 评估体系
 
@@ -233,5 +239,5 @@ eval_ocr.py（本地）
 - **API + UI 已合并为单一进程**：`serve.py` 通过 `gr.mount_gradio_app()` 在同一进程内同时提供 REST API（`/query`）和 Gradio UI（`/ui`），共享同一 `VectorStore` 连接，无锁竞争。`ui.py` 已删除。
 - **切换 contextual 模式必须完整重新 ingest**（TRUNCATE + 重建），`ON CONFLICT DO NOTHING` 不会更新已有行
 - Embedding / Reranker endpoint 由 `config.yaml` 的 `embedding.base_url` / `reranker.base_url` 指定，需要提前启动；两者可以是同一个服务，也可以分开。远程 GPU 时通过 `provider: ssh_tunnel` 配置 SSH 端口转发
-- OCR 服务（MinerU）与 embedding 服务共用远端端口 1080，不同时运行；`eval_ocr.py` 所有 multipart 字段统一放入 `files=` 参数（`(None, value)` 格式），禁止同时传 `files=` 和 `data=`（httpx + h11 合并 body 时会产生 tuple 类型错误）
+- OCR 走 MinerU 在线 API（`lex_rag/ocr.py`），自建 mineru-api 服务与 SSH 隧道已移除。上传到预签名 URL 时**不要设置 Content-Type、不要带 Authorization**（签名已在 URL 里，多带会 403）；轮询结果必须按 `data_id` 回填而不是按返回顺序——顺序错位不会报错，只会让每个样本对上别人的 ground truth
 - Grid search 中 `data/runs/grid/20260522T*` 两次历史结果因 BM25 bug 无效，不可引用

@@ -5,22 +5,25 @@ OCR 逐样本对比工具。
 data/runs/ocr_review/<ts>.md，供人工 review。
 
 用法：
-    uv run scripts/review_ocr.py --api-url http://127.0.0.1:6006
-    uv run scripts/review_ocr.py --api-url http://127.0.0.1:6006 --backend hybrid-auto-engine
+    uv run scripts/review_ocr.py
+    uv run scripts/review_ocr.py --model-version vlm
+
+前置：.env 里设置 MINERU_API_TOKEN
 """
 from __future__ import annotations
 
 import io
 import json
-import time
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
 import PIL.Image
 import editdistance
-import httpx
+from dotenv import load_dotenv
 from tqdm import tqdm
+
+from lex_rag import ocr
 
 PIL.Image.MAX_IMAGE_PIXELS = None
 
@@ -42,56 +45,6 @@ def pil_to_png_bytes(img: PIL.Image.Image) -> bytes:
     return buf.getvalue()
 
 
-def _extract_markdown(resp_json: dict) -> str:
-    results = resp_json.get("results", {})
-    if isinstance(results, dict):
-        for file_result in results.values():
-            if isinstance(file_result, dict):
-                v = file_result.get("md_content", "")
-                if v:
-                    return "\n".join(v) if isinstance(v, list) else str(v)
-    return ""
-
-
-def ocr_one(png_bytes: bytes, filename: str, api_url: str, client: httpx.Client,
-            lang: str = "ch", backend: str = "hybrid-auto-engine") -> str:
-    files = [
-        ("files",               (filename, png_bytes, "image/png")),
-        ("backend",             (None, backend)),
-        ("lang_list",           (None, lang)),
-        ("parse_method",        (None, "ocr")),
-        ("formula_enable",      (None, "false")),
-        ("table_enable",        (None, "true")),
-        ("image_analysis",      (None, "false")),
-        ("return_md",           (None, "true")),
-        ("return_middle_json",  (None, "false")),
-        ("return_model_output", (None, "false")),
-        ("return_content_list", (None, "false")),
-        ("return_images",       (None, "false")),
-        ("response_format_zip", (None, "false")),
-    ]
-    url = f"{api_url.rstrip('/')}/file_parse"
-    for attempt in range(5):
-        resp = client.post(url, files=files)
-        if resp.status_code == 409:
-            time.sleep(3 * (attempt + 1))
-            continue
-        resp.raise_for_status()
-        rj = resp.json()
-        md = _extract_markdown(rj)
-        if md:
-            return md
-        result_url = rj.get("result_url")
-        if result_url:
-            time.sleep(5)
-            md = _extract_markdown(client.get(result_url).json())
-            if md:
-                return md
-        return md
-    resp.raise_for_status()
-    return ""
-
-
 def cer(pred: str, gt: str) -> float:
     if not gt:
         return 0.0
@@ -102,7 +55,7 @@ def cer(pred: str, gt: str) -> float:
 # 加载每类第 1 个样本
 # ---------------------------------------------------------------------------
 
-def load_one_per_type(api_url: str) -> list[dict]:
+def load_one_per_type() -> list[dict]:
     from datasets import load_dataset
 
     anno_url   = "https://huggingface.co/datasets/opendatalab/OmniDocBench/resolve/main/OmniDocBench.json"
@@ -172,54 +125,47 @@ def load_one_per_type(api_url: str) -> list[dict]:
 def main() -> None:
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--api-url", default="http://127.0.0.1:6006")
-    parser.add_argument("--backend", default="hybrid-auto-engine",
-                        choices=["pipeline", "hybrid-auto-engine", "vlm"])
-    parser.add_argument("--lang", default="ch")
+    ocr.add_ocr_args(parser)
     args = parser.parse_args()
+    load_dotenv()          # MINERU_API_TOKEN
 
-    samples = load_one_per_type(args.api_url)
+    samples = load_one_per_type()
+    opts = ocr.options_from_args(args)
 
     lines: list[str] = [
-        f"# OCR Review — {args.backend}",
+        f"# OCR Review — MinerU 在线 API（model_version={opts.model_version}）",
         f"生成时间：{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
         "",
     ]
 
-    with httpx.Client(timeout=httpx.Timeout(300.0), follow_redirects=True) as client:
-        health = client.get(f"{args.api_url.rstrip('/')}/health")
-        health.raise_for_status()
+    # 每类只有 1 个样本，总数是个位数，一次性提交成一批即可
+    with ocr.MinerUCloudClient(options=opts) as client:
+        payload = [(f"{item['doc_type']}_review.png", pil_to_png_bytes(item["image"]))
+                   for item in samples]
+        try:
+            preds = client.parse(payload, progress=lambda n: tqdm.write(f"  已完成 {n} 个"))
+        except Exception as e:
+            preds = [f"[OCR 失败: {e}]"] * len(samples)
 
-        for item in tqdm(samples, desc="Review OCR"):
-            dtype = item["doc_type"]
-            png_bytes = pil_to_png_bytes(item["image"])
-
-            try:
-                pred_md = ocr_one(png_bytes, f"{dtype}_review.png",
-                                  args.api_url, client,
-                                  lang=args.lang, backend=args.backend)
-            except Exception as e:
-                pred_md = f"[OCR 失败: {e}]"
-
-            gt = item["gt_text"]
-            score = cer(pred_md, gt)
-
-            lines += [
-                "---",
-                f"## {dtype}",
-                f"图像：`{item['image_name']}`　CER: **{score:.4f}**",
-                "",
-                "### Ground Truth",
-                "```",
-                gt[:2000] + ("..." if len(gt) > 2000 else ""),
-                "```",
-                "",
-                "### OCR 输出",
-                "```",
-                pred_md[:2000] + ("..." if len(pred_md) > 2000 else ""),
-                "```",
-                "",
-            ]
+    for item, pred_md in zip(samples, preds):
+        gt = item["gt_text"]
+        score = cer(pred_md, gt)
+        lines += [
+            "---",
+            f"## {item['doc_type']}",
+            f"图像：`{item['image_name']}`　CER: **{score:.4f}**",
+            "",
+            "### Ground Truth",
+            "```",
+            gt[:2000] + ("..." if len(gt) > 2000 else ""),
+            "```",
+            "",
+            "### OCR 输出",
+            "```",
+            pred_md[:2000] + ("..." if len(pred_md) > 2000 else ""),
+            "```",
+            "",
+        ]
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
