@@ -34,7 +34,10 @@ reranker:
   # reranker.py 自己拼 /v1/rerank，多余的 /v1 会被容错去掉。
   # 认证用 .env 的 RERANK_API_KEY，未设置则回落到 EMBED_API_KEY。
   base_url: https://api.siliconflow.cn/v1
-  batch_size: 8
+  # 与 rerank_top_k 对齐，让一次查询只打一个 rerank 请求。
+  # 原值 8 是本地 8GB 显存 GPU 时期的显存约束；换成托管 API 后每查询要打 8 次
+  # 往返，实测 10.3 s/条，改成 60 后单请求约 2s。
+  batch_size: 60
   max_retries: 3
   retry_backoff_sec: 1.0
 
