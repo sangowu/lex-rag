@@ -1,7 +1,7 @@
 embedding:
-  provider: direct            # direct | ssh_tunnel
-  model: Qwen/Qwen3-Embedding-0.6B
-  base_url: http://host.docker.internal:6006/v1   # host's SSH tunnel to the remote GPU embedding server
+  provider: direct            # direct | ssh_tunnel | bge_http
+  model: BAAI/bge-m3
+  base_url: https://api.siliconflow.cn/v1   # SiliconFlow (hosted; no tunnel needed from a container)
   batch_size: 16
   max_retries: 2
   retry_backoff_sec: 1.0
@@ -26,9 +26,9 @@ retrieval:
 
 reranker:
   enabled: false              # true 时 pipeline.query() 自动 rerank
-  provider: direct            # direct | ssh_tunnel
+  provider: direct            # direct | ssh_tunnel | bge_http
   model: BAAI/bge-reranker-v2-m3
-  base_url: http://host.docker.internal:6006      # host's SSH tunnel to the remote GPU reranker server
+  base_url: https://api.siliconflow.cn/v1   # SiliconFlow (same host as embedding)
   batch_size: 8
   max_retries: 3
   retry_backoff_sec: 1.0

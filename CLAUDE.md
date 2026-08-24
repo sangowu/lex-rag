@@ -62,16 +62,21 @@ uv run scripts/ingest_ocr.py --input-dir data/scanned_docs --table chunks_ocr --
 
 ## 本地运行（模型服务）
 
-> **模型接入层重建中**：原先由两个本地 **llama.cpp** 实例提供的 embedding（:8081）与
-> reranker（:6006）已全部移除，`config.yaml` 里 `embedding.base_url` / `reranker.base_url`
-> 目前是占位值，需按新的模型提供商填写后才能跑通全链路。生成 / Judge 仍走 Gemini。
+> **模型接入现状**：embedding 与 reranker 已切到 **SiliconFlow**（托管，无需本地 GPU）；
+> 原先的两个本地 llama.cpp 实例（:8081 / :6006）已移除。生成 / Judge 仍是 Gemini，待迁移。
+
+| 用途 | 服务商 | 模型 | base_url | key |
+|------|--------|------|----------|-----|
+| embedding | SiliconFlow | `BAAI/bge-m3`（1024 维） | `https://api.siliconflow.cn/v1` | `EMBED_API_KEY` |
+| reranker | SiliconFlow | `BAAI/bge-reranker-v2-m3` | 同上（自动拼 `/v1/rerank`） | `RERANK_API_KEY`（缺省回落 `EMBED_API_KEY`） |
+| OCR | MinerU 在线 API | — | `https://mineru.net/api/v4` | `MINERU_API_TOKEN` |
 
 **启动顺序：先起向量库与模型服务，再跑 ingest / eval：**
 ```bash
 # 1. 向量库（lex_rag 自己的 docker pgvector；host 5432 被 rag_demo 占用，故映射到 5433）
 docker compose up -d db
 
-# 2. Embedding / Reranker 服务 —— 端点见 config.yaml 的 embedding.base_url / reranker.base_url
+# 2. Embedding / Reranker 已是托管服务（SiliconFlow），无需本地启动，只要 .env 里有 key
 
 # 3. 换 embedding 模型后必须清旧向量缓存并重灌（否则新旧模型向量混用）
 uv run scripts/ingest.py --refresh-cache        # 清 embed_cache.pkl + 重建 chunks 表
@@ -212,12 +217,15 @@ eval_ocr.py（本地，按 --batch-size 成批）
 | 参数 | 值 |
 |------|----|
 | table | chunks_qwen3 |
-| embedding | Qwen/Qwen3-Embedding-0.6B |
+| embedding | Qwen/Qwen3-Embedding-0.6B ⚠️ 已换成 SiliconFlow `BAAI/bge-m3` |
 | chunk_chars | 1000 / overlap=100 / strategy=recursive |
 | mode | hybrid（vector + BM25 RRF 融合） |
 | reranker | bge-reranker-v2-m3，top_k=60 |
 | contextual | gemini-3.1-flash-lite |
 | **hit@1** | **0.580** / **mrr@5=0.667** / hit@5=0.804 / hit@10=0.890 |
+
+> ⚠️ **上表是 Qwen3-Embedding 时期的数字。** 换 embedding 模型后旧向量不可用（同为 1024 维
+> 但语义空间不同，混用会静默给出错误的相似度），必须 `--refresh-cache` 重灌后重跑基线。
 
 > 召回优先场景（尽职调查/合规审查）改用 `chunks_contextual`（BGE-M3，rerank_top_k=60）：hit@5=**0.833**
 

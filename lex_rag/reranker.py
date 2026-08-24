@@ -68,7 +68,10 @@ class RerankClient:
             try:
                 resp = requests.post(
                     self._url,
-                    json={"model": self.cfg.model, "query": query, "documents": texts},
+                    # 显式 top_n=全部：SiliconFlow 等服务商不传 top_n 时返回条数
+                    # "由模型决定"，少回来的文档会被当成 0 分排到最后。
+                    json={"model": self.cfg.model, "query": query,
+                          "documents": texts, "top_n": len(texts)},
                     headers=self._headers(),
                     timeout=30,
                 )

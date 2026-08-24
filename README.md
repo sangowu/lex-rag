@@ -133,7 +133,7 @@ exposes `model_version` instead of `backend`, so the baseline needs a re-run to 
 ### Prerequisites
 
 1. **PostgreSQL with the `pgvector` extension** (`CREATE EXTENSION vector;`). Schema and indexes are created automatically on first ingest.
-2. **An embedding endpoint and a reranker endpoint** — set `embedding.base_url` and `reranker.base_url` in `config.yaml` (both ship as `REPLACE-ME-*` placeholders). They may point at the same service or at two different ones; the embedding side expects an OpenAI-compatible `/v1/embeddings`. For a remote GPU, set `provider: ssh_tunnel` and the app opens the port-forward for you.
+2. **An embedding endpoint and a reranker endpoint** — both ship pointed at [SiliconFlow](https://siliconflow.cn) (`BAAI/bge-m3` + `BAAI/bge-reranker-v2-m3`), so all you need is `EMBED_API_KEY` in `.env`. To use a different provider, change `embedding.base_url` / `reranker.base_url` in `config.yaml`; the embedding side expects an OpenAI-compatible `/v1/embeddings`. For a self-hosted GPU behind SSH, set `provider: ssh_tunnel` and the app opens the port-forward for you.
 3. **A Gemini API key** (used for generation, and for the optional Contextual-RAG / HyDE / agentic features).
 4. **A MinerU API token** (`MINERU_API_TOKEN`) — only for the OCR scripts; create one at [mineru.net/apiManage](https://mineru.net/apiManage).
 
