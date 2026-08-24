@@ -22,6 +22,7 @@ dependencies = [
     "uvicorn[standard]>=0.34",   # ASGI server (scripts/serve.py)
     "gradio>=4.44",               # Web UI (scripts/serve.py, mounted at /ui)
     "langfuse>=3.0",              # LLM 可观测性（失败安全，未配置则 no-op）
+    "httpx>=0.27",                # MinerU 在线 API 客户端（lex_rag/ocr.py）
 ]
 
 [project.scripts]

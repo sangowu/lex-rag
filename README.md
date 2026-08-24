@@ -97,7 +97,9 @@ The harness made each change measurable. Headline metric is **semantic-hit rate*
 
 ### OCR layer (independent)
 
-MinerU `hybrid-auto-engine` on **OmniDocBench** (1615 samples):
+MinerU on **OmniDocBench** (1615 samples). These numbers come from a self-hosted `mineru-api`
+(`hybrid-auto-engine`) that has since been replaced by MinerU's hosted API — the hosted API
+exposes `model_version` instead of `backend`, so the baseline needs a re-run to stay comparable:
 
 | | CER | WER |
 |--|:---:|:---:|
@@ -120,7 +122,7 @@ MinerU `hybrid-auto-engine` on **OmniDocBench** (1615 samples):
 | Reranker | BAAI/bge-reranker-v2-m3 (TEI `/v1/rerank`) |
 | Generation & judging | Google Gemini (JSON mode for generation; LLM-as-judge for eval) |
 | Serving | FastAPI (async, SSE) + Gradio, single process |
-| OCR | MinerU (`hybrid-auto-engine`), benchmarked on OmniDocBench |
+| OCR | MinerU hosted API (v4 batch: presigned upload → poll → zip), benchmarked on OmniDocBench |
 | Data | CUAD (HuggingFace `theatticusproject/cuad`) |
 | Infrastructure as code | **Terraform** — `import`-based adoption of the existing AWS estate, `plan` as the change gate (see [`infra/`](infra/)) |
 
@@ -133,6 +135,7 @@ MinerU `hybrid-auto-engine` on **OmniDocBench** (1615 samples):
 1. **PostgreSQL with the `pgvector` extension** (`CREATE EXTENSION vector;`). Schema and indexes are created automatically on first ingest.
 2. **An embedding endpoint and a reranker endpoint** — set `embedding.base_url` and `reranker.base_url` in `config.yaml` (both ship as `REPLACE-ME-*` placeholders). They may point at the same service or at two different ones; the embedding side expects an OpenAI-compatible `/v1/embeddings`. For a remote GPU, set `provider: ssh_tunnel` and the app opens the port-forward for you.
 3. **A Gemini API key** (used for generation, and for the optional Contextual-RAG / HyDE / agentic features).
+4. **A MinerU API token** (`MINERU_API_TOKEN`) — only for the OCR scripts; create one at [mineru.net/apiManage](https://mineru.net/apiManage).
 
 ### Install
 
