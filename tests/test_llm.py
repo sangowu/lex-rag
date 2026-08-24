@@ -117,3 +117,29 @@ def test_from_config_reads_base_url_from_config():
     c = ChatClient.from_config(_cfg(base_url="https://example.com/v4/"))
     assert c.base_url == "https://example.com/v4/"
     assert c.model == "glm-test"
+
+
+def test_thinking_field_is_omitted_by_default_and_sent_when_set():
+    """thinking 是 Z.ai 专有字段：不配时整个字段不发，换服务商才不会 400。"""
+    c = _client()
+    c._client.chat.completions.create.return_value = _resp("{}")
+
+    c.complete("p")
+    assert "extra_body" not in c._client.chat.completions.create.call_args[1]
+
+    c.thinking = False
+    c.complete("p")
+    assert c._client.chat.completions.create.call_args[1]["extra_body"] == {
+        "thinking": {"type": "disabled"}
+    }
+
+    c.thinking = True
+    c.complete("p")
+    assert c._client.chat.completions.create.call_args[1]["extra_body"] == {
+        "thinking": {"type": "enabled"}
+    }
+
+
+def test_from_config_picks_up_thinking():
+    assert ChatClient.from_config(_cfg()).thinking is None
+    assert ChatClient.from_config(_cfg(thinking=False)).thinking is False

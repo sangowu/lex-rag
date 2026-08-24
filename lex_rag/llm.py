@@ -51,6 +51,7 @@ class ChatClient:
         max_retries: int = 3,
         retry_backoff_sec: float = 2.0,
         timeout: float = 120.0,
+        thinking: bool | None = None,
     ) -> None:
         self.model = model
         self.api_key = api_key
@@ -58,6 +59,9 @@ class ChatClient:
         self.max_retries = max_retries
         self.retry_backoff_sec = retry_backoff_sec
         self.timeout = timeout
+        # None = 不发这个字段（用服务端默认，也兼容不认识它的其他服务商）
+        # False = 关闭思考链；True = 显式开启
+        self.thinking = thinking
         self._client: Any = None      # 懒加载，import lex_rag.llm 本身不该有副作用
 
     @classmethod
@@ -73,7 +77,19 @@ class ChatClient:
             base_url=getattr(cfg, "base_url", DEFAULT_BASE_URL),
             max_retries=getattr(cfg, "max_retries", 3) if max_retries is None else max_retries,
             retry_backoff_sec=getattr(cfg, "retry_backoff_sec", 2.0),
+            thinking=getattr(cfg, "thinking", None),
         )
+
+    def _extra_body(self) -> dict:
+        """Z.ai 的 thinking 开关。GLM-4.5+ 默认 enabled，实测同一个问题
+        开着要 376 个输出 token（其中 1366 字符是 reasoning_content），
+        关掉只要 28 个——对本项目的抽取式问答，思考链纯属浪费。
+
+        thinking 为 None 时整个字段不发送，保证换到不认识它的服务商也不会 400。
+        """
+        if self.thinking is None:
+            return {}
+        return {"extra_body": {"thinking": {"type": "enabled" if self.thinking else "disabled"}}}
 
     def _get_client(self) -> Any:
         if self._client is None:
@@ -101,6 +117,7 @@ class ChatClient:
                     model=self.model,
                     messages=[{"role": "user", "content": prompt}],
                     **({"response_format": {"type": "json_object"}} if json_mode else {}),
+                    **self._extra_body(),
                 )
                 text = (resp.choices[0].message.content or "").strip()
                 in_tok, out_tok = tracing.chat_usage(resp)
@@ -146,6 +163,7 @@ class ChatClient:
                 stream=True,
                 stream_options={"include_usage": True},
                 **({"response_format": {"type": "json_object"}} if json_mode else {}),
+                **self._extra_body(),
             )
             for chunk in stream:
                 # 带 usage 的那个 chunk 通常没有 choices，先取 usage 再取 delta
