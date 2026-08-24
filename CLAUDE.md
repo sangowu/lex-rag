@@ -74,7 +74,7 @@ uv run scripts/ingest_ocr.py --input-dir data/scanned_docs --table chunks_ocr --
 
 **启动顺序：先起向量库与模型服务，再跑 ingest / eval：**
 ```bash
-# 1. 向量库（lex_rag 自己的 docker pgvector；host 5432 被 rag_demo 占用，故映射到 5433）
+# 1. 向量库（lex_rag 自己的 docker pgvector；5432 被 rag_demo、5433 被 paralegal 占用，故映射到 5434）
 docker compose up -d db
 
 # 2. Embedding / Reranker 已是托管服务（SiliconFlow），无需本地启动，只要 .env 里有 key

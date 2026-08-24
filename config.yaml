@@ -40,7 +40,7 @@ reranker:
 
 database:
   host: localhost
-  port: 5433                   # lex_rag 自己的 docker pgvector（host 5432 被 rag_demo 占用）
+  port: 5434                   # lex_rag 自己的 docker pgvector（5432 被 rag_demo、5433 被 paralegal 占用）
   name: legal_rag_v1
   user: rag
   table: chunks                # 切换到 chunks_contextual 可对比 contextual RAG 效果
