@@ -8,7 +8,7 @@ Built end-to-end on the [CUAD](https://www.atticusprojectai.org/cuad) contract-u
   <img alt="Python" src="https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white">
   <img alt="PostgreSQL" src="https://img.shields.io/badge/PostgreSQL-pgvector-4169E1?logo=postgresql&logoColor=white">
   <img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-async-009688?logo=fastapi&logoColor=white">
-  <img alt="Gemini" src="https://img.shields.io/badge/LLM-Gemini-8E75B2?logo=google&logoColor=white">
+  <img alt="GLM" src="https://img.shields.io/badge/LLM-GLM--4.7--Flash-4F46E5">
   <img alt="uv" src="https://img.shields.io/badge/packaging-uv-DE5FE9">
 </p>
 
@@ -43,7 +43,7 @@ Most RAG demos stop at "embed → retrieve → prompt". This one is built like a
 flowchart LR
     subgraph Ingest
         A[CUAD contracts] --> B[Chunking<br/>recursive / parent-child]
-        B --> C{Contextual RAG?<br/>optional Gemini prefix}
+        B --> C{Contextual RAG?<br/>optional LLM prefix}
         C --> D[Embeddings<br/>Qwen3 / BGE-M3]
         D --> E[(PostgreSQL + pgvector<br/>vector + tsvector/BM25)]
     end
@@ -52,7 +52,7 @@ flowchart LR
         Q[Question] --> R{HyDE / Multi-query?<br/>optional}
         R --> S[Hybrid search<br/>vector + BM25 → RRF]
         S --> T[Cross-encoder rerank<br/>bge-reranker-v2-m3]
-        T --> U[Generator<br/>Gemini JSON mode + refusal gate]
+        T --> U[Generator<br/>JSON mode + refusal gate]
         U --> V[Answer + verbatim citations]
     end
 
@@ -91,7 +91,7 @@ The harness made each change measurable. Headline metric is **semantic-hit rate*
 | v3 (verbatim-quote constraint) | 0.760 | 0.100 | 0.667 | 0.867 |
 | **v4 (current best)** | **0.820** | **0.040** | **0.667** | **0.967** |
 
-**v4** = Gemini JSON mode + verbatim-quote constraint + few-shot + `doc_meta` injection (with the RAGAS judge given the same `doc_meta` context) + reranker, `top_k=10`, `generate_k=8`, avg latency ~756 ms.
+**v4** = JSON mode (Gemini at the time) + verbatim-quote constraint + few-shot + `doc_meta` injection (with the RAGAS judge given the same `doc_meta` context) + reranker, `top_k=10`, `generate_k=8`, avg latency ~756 ms.
 
 > A debugging highlight: an earlier `doc_meta` experiment *looked* like it hurt faithfulness. Root cause wasn't the model — the RAGAS judge wasn't being shown `doc_meta`, so metadata-sourced answers were scored as hallucinations. Feeding the judge the same context removed the measurement bias and unlocked the v4 jump. (See `CLAUDE.md` for the full run log.)
 
@@ -120,7 +120,7 @@ exposes `model_version` instead of `backend`, so the baseline needs a re-run to 
 | Vector store | PostgreSQL + **pgvector** (dense) + **tsvector** (BM25 full-text) |
 | Embeddings | Qwen3-Embedding-0.6B / BAAI/bge-m3 via OpenAI-compatible API |
 | Reranker | BAAI/bge-reranker-v2-m3 (TEI `/v1/rerank`) |
-| Generation & judging | Google Gemini (JSON mode for generation; LLM-as-judge for eval) |
+| Generation & judging | Z.ai GLM-4.7-Flash via an OpenAI-compatible endpoint (JSON mode for generation; LLM-as-judge for eval) |
 | Serving | FastAPI (async, SSE) + Gradio, single process |
 | OCR | MinerU hosted API (v4 batch: presigned upload → poll → zip), benchmarked on OmniDocBench |
 | Data | CUAD (HuggingFace `theatticusproject/cuad`) |
@@ -134,7 +134,7 @@ exposes `model_version` instead of `backend`, so the baseline needs a re-run to 
 
 1. **PostgreSQL with the `pgvector` extension** (`CREATE EXTENSION vector;`). Schema and indexes are created automatically on first ingest.
 2. **An embedding endpoint and a reranker endpoint** — both ship pointed at [SiliconFlow](https://siliconflow.cn) (`BAAI/bge-m3` + `BAAI/bge-reranker-v2-m3`), so all you need is `EMBED_API_KEY` in `.env`. To use a different provider, change `embedding.base_url` / `reranker.base_url` in `config.yaml`; the embedding side expects an OpenAI-compatible `/v1/embeddings`. For a self-hosted GPU behind SSH, set `provider: ssh_tunnel` and the app opens the port-forward for you.
-3. **A Gemini API key** (used for generation, and for the optional Contextual-RAG / HyDE / agentic features).
+3. **A Z.ai API key** (`GENERATE_MODEL_API`) — used for generation, judging, and the optional Contextual-RAG / HyDE / agentic features. Any OpenAI-compatible chat endpoint works: change `contextual.base_url` / `contextual.model` in `config.yaml`.
 4. **A MinerU API token** (`MINERU_API_TOKEN`) — only for the OCR scripts; create one at [mineru.net/apiManage](https://mineru.net/apiManage).
 
 ### Install
@@ -150,7 +150,7 @@ Copy `.env.example` → `.env` and fill in:
 ```env
 EMBED_API_KEY=...     # embedding service auth
 PG_PASSWORD=...       # PostgreSQL password
-GEMINI_API_KEY=...    # generation + optional Gemini-based features
+GENERATE_MODEL_API=...  # generation, judging, and optional LLM-based features
 ```
 
 All runtime parameters live in **`config.yaml`**. CLI flags (`--overlap`, `--table`, `--reranker`, …) override the YAML **at runtime without editing the file**.
@@ -218,7 +218,7 @@ Every retrieval/generation strategy is a toggle, which is what makes the ablatio
 ```yaml
 retrieval:   { mode: hybrid, top_k: 10, rerank_top_k: 60 }   # vector | bm25 | hybrid
 reranker:    { enabled: false, model: BAAI/bge-reranker-v2-m3 }
-contextual:  { enabled: false, model: gemini-3.1-flash-lite } # Contextual RAG
+contextual:  { enabled: false, model: glm-4.7-flash }        # generation + Contextual RAG
 hyde:        { enabled: false }                               # hypothetical-document embeddings
 multi_query: { enabled: false, n: 3 }                         # query expansion + RRF
 parent_child:{ parent_chars: 1000, child_chars: 300 }         # small-to-big retrieval
@@ -237,7 +237,8 @@ lex-rag/
 │   ├── embeddings.py        # OpenAI-compatible client with on-disk cache
 │   ├── reranker.py          # cross-encoder rerank client
 │   ├── contextualizer.py    # Contextual RAG / HyDE / multi-query / metadata extraction
-│   ├── generator.py         # Gemini JSON-mode generator with refusal gate + citations
+│   ├── generator.py         # JSON-mode generator with refusal gate + citations
+│   ├── llm.py               # single entry point for every LLM call (OpenAI-compatible)
 │   ├── agent.py             # agentic iterative-retrieval wrapper
 │   ├── evals.py             # retrieval metric computation
 │   └── config.py            # dataclass config, YAML + .env loader
@@ -253,11 +254,11 @@ lex-rag/
 
 ## Design decisions worth calling out
 
-- **Refusal as a structured field, not a heuristic.** Gemini JSON mode returns `{"refused": bool, ...}`, eliminating the "soft refusal" ambiguity where a model hedges in prose. The eval harness then measures false-refusal and false-answer rates directly.
+- **Refusal as a structured field, not a heuristic.** JSON mode returns `{"refused": bool, ...}`, eliminating the "soft refusal" ambiguity where a model hedges in prose. The eval harness then measures false-refusal and false-answer rates directly. (Note: an OpenAI-compatible `json_object` mode guarantees valid syntax, not a schema — the parsers field defaults are the backstop.)
 - **BM25 inside PostgreSQL.** Full-text search uses a `GENERATED` `tsvector` column, so dense and sparse retrieval hit the same store with one connection — no separate search engine to operate. (A subtle CUAD-template bug that broke BM25 OR-semantics is documented in `docs/bug_fixes.md`.)
 - **Config-driven ablations.** Scripts override config via `dataclasses.replace()` at runtime rather than mutating files, so a grid search can fan out across parameter combinations without side effects.
 - **Provenance tracking.** An `ingest_meta` table records the actual chunking parameters used for each table, so the evaluator reads real ingest settings instead of trusting the current YAML.
-- **Lazy, optional heavy deps.** Gemini (`from google import genai`) is imported inside constructors — toggling a feature off means its dependency is never touched.
+- **Lazy, optional heavy deps.** The OpenAI client is built on first use inside `ChatClient` — importing a module never opens a connection or reads a key.
 
 ---
 

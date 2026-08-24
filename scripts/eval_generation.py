@@ -145,13 +145,14 @@ def run_ragas(samples: list[dict], cfg: RagasConfig) -> dict:
     """
     samples 格式：
         [{"question": ..., "answer": ..., "contexts": [...], "ground_truth": ...}]
-    使用 Gemini LLM-as-Judge 评估 Faithfulness 和 Answer Relevancy，
+    使用 LLM-as-Judge 评估 Faithfulness 和 Answer Relevancy，
     与 RAGAS 框架定义的指标语义相同，但无需引入 ragas 库。
     """
     import time
-    from google import genai
 
-    client = genai.Client(api_key=cfg.api_key)
+    from lex_rag.llm import ChatClient
+
+    chat = ChatClient.from_config(cfg)
     min_interval = 60.0 / cfg.rpm_limit
     last_call = 0.0
 
@@ -160,16 +161,11 @@ def run_ragas(samples: list[dict], cfg: RagasConfig) -> dict:
         elapsed = time.monotonic() - last_call
         if elapsed < min_interval:
             time.sleep(min_interval - elapsed)
-        resp = client.models.generate_content(model=cfg.model, contents=prompt)
+        data = chat.complete_json(prompt, trace_name="judge")
         last_call = time.monotonic()
-        raw = resp.text.strip()
-        if raw.startswith("```"):
-            lines = raw.split("\n")
-            raw = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
-        try:
-            return json.loads(raw)
-        except json.JSONDecodeError:
-            return {"score": 0.5, "reason": "parse error"}
+        # complete_json 解析失败会返回 {}，这里按中性分处理，
+        # 不让单条判分失败中断整批评测
+        return data or {"score": 0.5, "reason": "parse error"}
 
     faithfulness_scores, relevancy_scores = [], []
     per_sample = []

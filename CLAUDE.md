@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # 全量 ingest（默认表 chunks，TRUNCATE 后重建）
 uv run scripts/ingest.py
 
-# Contextual RAG ingest（调用 Gemini，写入 chunks_contextual 表）
+# Contextual RAG ingest（调用 LLM，写入 chunks_contextual 表）
 uv run scripts/ingest.py --contextual
 
 # 指定 overlap/chunk_chars 覆盖 config.yaml
@@ -63,13 +63,14 @@ uv run scripts/ingest_ocr.py --input-dir data/scanned_docs --table chunks_ocr --
 ## 本地运行（模型服务）
 
 > **模型接入现状**：embedding 与 reranker 已切到 **SiliconFlow**（托管，无需本地 GPU）；
-> 原先的两个本地 llama.cpp 实例（:8081 / :6006）已移除。生成 / Judge 仍是 Gemini，待迁移。
+> 原先的两个本地 llama.cpp 实例（:8081 / :6006）已移除。生成 / Judge 已从 Gemini 迁到 **Z.ai GLM**。
 
 | 用途 | 服务商 | 模型 | base_url | key |
 |------|--------|------|----------|-----|
 | embedding | SiliconFlow | `BAAI/bge-m3`（1024 维） | `https://api.siliconflow.cn/v1` | `EMBED_API_KEY` |
 | reranker | SiliconFlow | `BAAI/bge-reranker-v2-m3` | 同上（自动拼 `/v1/rerank`） | `RERANK_API_KEY`（缺省回落 `EMBED_API_KEY`） |
 | OCR | MinerU 在线 API | — | `https://mineru.net/api/v4` | `MINERU_API_TOKEN` |
+| 生成 / Judge / 辅助 LLM | Z.ai | `glm-4.7-flash` | `https://api.z.ai/api/paas/v4/` | `GENERATE_MODEL_API` |
 
 **启动顺序：先起向量库与模型服务，再跑 ingest / eval：**
 ```bash
@@ -109,7 +110,7 @@ uv run scripts/serve.py                          # http://127.0.0.1:6800/ui
 EMBED_API_KEY=...      # embedding 服务认证
 PG_PASSWORD=...        # PostgreSQL 密码
 MINERU_API_TOKEN=...   # MinerU 在线 API（OCR 相关脚本必须）
-GEMINI_API_KEY=...     # Contextual RAG（--contextual 时必须）
+GENERATE_MODEL_API=... # 生成 / Judge / Contextual RAG / HyDE / multi-query
 LANGFUSE_PUBLIC_KEY=…  # 可选：LLM 可观测性（留空则 no-op）
 LANGFUSE_SECRET_KEY=…
 LANGFUSE_HOST=https://cloud.langfuse.com
@@ -125,7 +126,7 @@ LANGFUSE_HOST=https://cloud.langfuse.com
 CUAD (HuggingFace)
   → cuad.py            # 下载、解析，输出 QAItem + .txt 文件
   → chunking.py        # fixed / recursive 两种策略，产出 ChunkWindow
-  → contextualizer.py  # （可选）调用 Gemini 为每个 chunk 生成上下文前缀
+  → contextualizer.py  # （可选）调用 LLM 为每个 chunk 生成上下文前缀
   → embeddings.py      # OpenAI-compatible API（BAAI/bge-m3），带 pickle 缓存
   → store.py           # PostgreSQL + pgvector，写入 chunks 表
 ```
@@ -141,7 +142,8 @@ question → embeddings.py → store.py（vector / bm25 / hybrid RRF）
 - **`pipeline.py`** — 唯一的对外入口，封装 ingest + query 两条路径，组合上面所有模块
 - **`store.py`** — 动态表名（`VectorStore(dsn, table="chunks")`），`_init_schema()` 自动建表建索引；BM25 用 PostgreSQL `tsvector`，通过 OR 语义修复了 CUAD 模板问题（见 `docs/bug_fixes.md`）；`ingest_meta` 表记录每张 chunk 表的实际 ingest 参数，`eval.py` 从此读取
 - **`config.py`** — 所有 dataclass 配置，`load_config()` 从 config.yaml + .env 加载；各脚本用 `dataclasses.replace()` 在运行时覆盖字段，不改文件
-- **`contextualizer.py`** — `from google import genai` 是懒加载（在 `__init__` 内），不 import 此模块不会引入 Gemini 依赖；结果缓存在 `.cache/contextual.json`，key = `chunk_id:text_hash`
+- **`llm.py`** — `ChatClient`，所有 LLM 调用的唯一入口（OpenAI 兼容 `/chat/completions`）。换服务商只改 `config.yaml` 的 `contextual.base_url` / `contextual.model`，调用方不动
+- **`contextualizer.py`** — 五个类都用 `ChatClient.from_config(cfg, max_retries=0)`：各类自带重试循环，不覆盖会变成 (n+1)² 次请求；结果缓存在 `.cache/contextual.json`，key = `chunk_id:text_hash`
 
 ### PostgreSQL 表结构
 
@@ -201,11 +203,12 @@ eval_ocr.py（本地，按 --batch-size 成批）
 **生成层（`scripts/eval_generation.py`）：** 三个维度：
 1. **语义相似度命中率** — 生成答案与 gold answer 的 embedding cosine 相似度（阈值 0.70），比字符串包含更公平
 2. **拒答准确率** — FP（无答案问题被回答）/ FN（有答案问题被拒答），基于 `generator.py` 的 JSON mode `refused` 字段
-3. **LLM-as-Judge** — Faithfulness（答案忠实于上下文）/ Answer Relevancy，通过 Gemini 实现，无需 ragas 库
+3. **LLM-as-Judge** — Faithfulness（答案忠实于上下文）/ Answer Relevancy，通过 `ChatClient` 实现，无需 ragas 库
 
 ### 核心模块（生成层）
 
-- **`generator.py`** — `LegalGenerator`，使用 Gemini JSON mode（`response_mime_type="application/json"`）强制结构化输出 `{"refused": bool, "answer": str}`，彻底消除软拒答歧义；`_build_context()` 注入 doc_meta 前缀
+- **`generator.py`** — `LegalGenerator`，用 `response_format={"type":"json_object"}` 输出 `{"refused": bool, "answer": str}`，消除软拒答歧义；`_build_context()` 注入 doc_meta 前缀。
+  ⚠️ 与 Gemini 时期的差异：OpenAI 风格没有服务端 `response_schema`，**只保证语法合法、不保证字段齐全**，结构约束退化为 prompt 约束，`_parse_response` 的字段缺省逻辑成为最后一道防线
 - **`contextualizer.py`** — `MetadataExtractor` 提取合同元数据（contract_type/party_a/party_b/effective_date/governing_law/key_clauses），缓存于 `.cache/meta_extract.json`
 - **`store.py`** — `doc_meta` 表存储结构化元数据，`get_doc_meta(doc_id)` 供查询时注入
 - **`pipeline.py`** — 新增 `get_doc_meta(doc_id)` 方法
@@ -221,7 +224,7 @@ eval_ocr.py（本地，按 --batch-size 成批）
 | chunk_chars | 1000 / overlap=100 / strategy=recursive |
 | mode | hybrid（vector + BM25 RRF 融合） |
 | reranker | bge-reranker-v2-m3，top_k=60 |
-| contextual | gemini-3.1-flash-lite |
+| contextual | gemini-3.1-flash-lite ⚠️ 已换成 `glm-4.7-flash` |
 | **hit@1** | **0.580** / **mrr@5=0.667** / hit@5=0.804 / hit@10=0.890 |
 
 > ⚠️ **上表是 Qwen3-Embedding 时期的数字。** 换 embedding 模型后旧向量不可用（同为 1024 维
@@ -242,7 +245,7 @@ eval_ocr.py（本地，按 --batch-size 成批）
 | answer_relevancy | **0.967** | = | ▲ +0.100 |
 | avg_latency_ms | 756 | ≈ | ≈ |
 
-配置：Gemini JSON mode + 逐字引用约束 + few-shot 示例 + **doc_meta 注入** + **RAGAS judge 包含 doc_meta 上下文** + reranker，top_k=10，generate_k=8
+配置：JSON mode（当时是 Gemini）+ 逐字引用约束 + few-shot 示例 + **doc_meta 注入** + **RAGAS judge 包含 doc_meta 上下文** + reranker，top_k=10，generate_k=8
 
 > **全面突破**：semantic_hit 创新高（0.820），faithfulness 维持 v3 水平（0.667），FN 恢复 v2 最低（0.040），relevancy 恢复 0.967。
 > 根因：RAGAS judge 看到 doc_meta 后能正确验证元数据来源的答案，消除了测量偏差。

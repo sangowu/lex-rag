@@ -100,12 +100,8 @@ def _parse_judge(raw: str) -> dict:
 
 
 def _judge(client, model: str, prompt: str, name: str) -> dict:
-    """一次 LLM-as-Judge 调用；同时记一条 generation（在 item trace 下自动嵌套，含 token）。"""
-    gen = tracing.start_generation(f"judge.{name}", model, prompt)
-    resp = client.models.generate_content(model=model, contents=prompt)
-    in_tok, out_tok = tracing.genai_usage(resp)
-    tracing.end_generation(gen, output=resp.text, input_tokens=in_tok, output_tokens=out_tok)
-    return _parse_judge(resp.text)
+    """一次 LLM-as-Judge 调用；tracing 由 ChatClient 内部完成（在 item trace 下自动嵌套）。"""
+    return _parse_judge(client.complete(prompt, json_mode=True, trace_name=f"judge.{name}"))
 
 
 # ---------------------------------------------------------------------------
@@ -249,13 +245,14 @@ def main() -> None:
     if args.reranker:
         cfg = replace(cfg, reranker=replace(cfg.reranker, enabled=True))
 
-    from google import genai
     from langfuse import get_client
+
+    from lex_rag.llm import ChatClient
 
     langfuse = get_client()
     pipeline = RAGPipeline(cfg)
     generator = LegalGenerator(cfg.contextual)
-    judge_client = genai.Client(api_key=cfg.ragas.api_key)
+    judge_client = ChatClient.from_config(cfg.ragas)
     embedder = EmbeddingClient(cfg.embedding, cache_path=Path("data/embed_cache_eval.pkl"))
 
     # 1) 同步 Dataset（幂等）

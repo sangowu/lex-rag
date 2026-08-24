@@ -50,16 +50,19 @@ evaluation:
   scope: contract             # contract | corpus
   mode: span                  # span | containment
 
+# 生成层 + 所有辅助 LLM 任务（contextual / HyDE / multi-query / meta 提取 / 查询重写）共用这一节。
+# enabled 只控制 ingest 阶段的 Contextual RAG；生成、HyDE 等不看这个字段。
 contextual:
-  enabled: false              # true 时 ingest 阶段为每个 chunk 调用 Gemini 生成上下文前缀
-  model: gemini-3.1-flash-lite
-  rpm_limit: 120               # 免费层 15，付费层最高 2000；控制 API 调用频率
+  enabled: false              # true 时 ingest 阶段为每个 chunk 调用 LLM 生成上下文前缀
+  model: glm-4.7-flash
+  base_url: https://api.z.ai/api/paas/v4/   # Z.ai，OpenAI 兼容；key 取自 .env 的 GENERATE_MODEL_API
+  rpm_limit: 120               # 控制 API 调用频率
   max_retries: 3
   retry_backoff_sec: 2.0      # 指数退避基数（秒）
   section_chars: 3000         # HierarchicalContextualizer 的 section 切分大小
 
 hyde:
-  enabled: false              # true 时 query 阶段先用 Gemini 生成假设合同条款再 embed（复用 contextual 配置）
+  enabled: false              # true 时 query 阶段先用 LLM 生成假设合同条款再 embed（复用 contextual 配置）
 
 multi_query:
   enabled: false              # true 时将问题改写为 N 个变体，多路检索后 RRF 合并（复用 contextual 配置）
@@ -71,5 +74,6 @@ parent_child:
   overlap: 50                  # child 之间的 overlap
 
 ragas:
-  model: gemini-3.5-flash        # judge 模型，建议强于 generation 模型
+  model: glm-4.7-flash           # judge 模型；条件允许时建议换成强于 generation 的模型
+  base_url: https://api.z.ai/api/paas/v4/
   rpm_limit: 60                  # RAGAS 每轮评估会多次调用 LLM，注意限速

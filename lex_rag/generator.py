@@ -17,7 +17,7 @@ from typing import Iterator
 
 from lex_rag.chunking import ChunkWindow
 from lex_rag.config import ContextualConfig
-from lex_rag import tracing
+from lex_rag.llm import ChatClient
 
 _GENERATE_PROMPT = """\
 You are a legal contract analysis assistant. Answer questions based ONLY on the contract excerpts provided.
@@ -60,16 +60,6 @@ _MULTI_DOC_NOTE = """\
 - Excerpts come from MULTIPLE contracts; cite each quote with [N] AND mention the contract name inline, e.g. "quote" [1] (CONTRACT_NAME)\
 """
 
-_RESPONSE_SCHEMA = {
-    "type": "OBJECT",
-    "properties": {
-        "refused": {"type": "BOOLEAN"},
-        "answer":  {"type": "STRING"},
-    },
-    "required": ["refused", "answer"],
-}
-
-
 @dataclass
 class Citation:
     doc_id: str
@@ -93,13 +83,7 @@ class GenerationResult:
 class LegalGenerator:
     def __init__(self, cfg: ContextualConfig):
         self.cfg = cfg
-        self._client = None              # 懒加载 google.genai
-
-    def _get_client(self):
-        if self._client is None:
-            from google import genai
-            self._client = genai.Client(api_key=self.cfg.api_key)
-        return self._client
+        self._chat = ChatClient.from_config(cfg)
 
     def _meta_block(self, doc_id: str, meta: dict) -> str:
         lines = [f"[Contract: {doc_id}]"]
@@ -184,33 +168,9 @@ class LegalGenerator:
 
         return answer, False, citations
 
-    def _call_gemini(self, prompt: str) -> dict:
-        from google.genai import types
-        config = types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=_RESPONSE_SCHEMA,
-        )
-        gen = tracing.start_generation("gemini.generate", self.cfg.model, prompt)
-        for attempt in range(self.cfg.max_retries + 1):
-            try:
-                client = self._get_client()
-                resp = client.models.generate_content(
-                    model=self.cfg.model,
-                    contents=prompt,
-                    config=config,
-                )
-                in_tok, out_tok = tracing.genai_usage(resp)
-                tracing.end_generation(
-                    gen, output=resp.text, input_tokens=in_tok, output_tokens=out_tok
-                )
-                return json.loads(resp.text or "{}")
-            except Exception:
-                if attempt < self.cfg.max_retries:
-                    time.sleep(self.cfg.retry_backoff_sec * (2 ** attempt))
-                else:
-                    tracing.end_generation(gen, output="<error>")
-                    raise
-        raise RuntimeError("unreachable")
+    def _call_llm(self, prompt: str) -> dict:
+        """JSON mode 调用，返回解析后的 dict。重试与 tracing 都在 ChatClient 里。"""
+        return self._chat.complete_json(prompt, trace_name="generator.generate")
 
     def generate_stream(
         self,
@@ -225,8 +185,6 @@ class LegalGenerator:
 
         实现：用 JSON mode streaming，状态机从流式 JSON token 中提取 answer 字段内容。
         """
-        from google.genai import types
-
         if not chunks:
             yield GenerationResult(
                 question=question, answer="", is_refused=True,
@@ -241,16 +199,8 @@ class LegalGenerator:
             context=context, question=question, multi_doc_note=multi_doc_note
         )
 
-        config = types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=_RESPONSE_SCHEMA,
-        )
-
         t0 = time.perf_counter()
         full_text = ""
-        gen = tracing.start_generation("gemini.generate_stream", self.cfg.model, prompt)
-        in_tok: int | None = None
-        out_tok: int | None = None
 
         # 状态机状态
         # SCAN    — 未找到 "answer": " 前缀
@@ -262,20 +212,9 @@ class LegalGenerator:
         escaped = False      # 上一个字符是否为反斜杠
 
         try:
-            client = self._get_client()
-            for chunk_resp in client.models.generate_content_stream(
-                model=self.cfg.model,
-                contents=prompt,
-                config=config,
-            ):
-                token = chunk_resp.text or ""
+            for token in self._chat.stream(prompt, json_mode=True,
+                                           trace_name="generator.generate_stream"):
                 full_text += token
-                # 流式最后一个 chunk 才携带 usage_metadata，逐块覆盖取最终值
-                _in, _out = tracing.genai_usage(chunk_resp)
-                if _in is not None:
-                    in_tok = _in
-                if _out is not None:
-                    out_tok = _out
 
                 if state == "DONE":
                     continue
@@ -312,7 +251,6 @@ class LegalGenerator:
                         yield "".join(out)
 
         except Exception as e:
-            tracing.end_generation(gen, output="<error>")
             yield GenerationResult(
                 question=question, answer="", is_refused=False,
                 latency_ms=(time.perf_counter() - t0) * 1000,
@@ -320,9 +258,6 @@ class LegalGenerator:
             )
             return
 
-        tracing.end_generation(
-            gen, output=full_text, input_tokens=in_tok, output_tokens=out_tok
-        )
         latency_ms = (time.perf_counter() - t0) * 1000
 
         # 用完整响应文本做最终解析（citations、refused 判断）
@@ -365,7 +300,7 @@ class LegalGenerator:
 
         t0 = time.perf_counter()
         try:
-            data = self._call_gemini(prompt)
+            data = self._call_llm(prompt)
         except Exception as e:
             return GenerationResult(
                 question=question,
