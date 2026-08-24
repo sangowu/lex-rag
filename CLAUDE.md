@@ -89,6 +89,11 @@ uv run scripts/serve.py                          # http://127.0.0.1:6800/ui
 - **reranker 响应格式**：`direct` provider 走 `/v1/rerank`，解析 TEI 风格
   `{"results": [{"index", "score"}]}`，并兼容把分数命名为 `relevance_score` 的实现；
   `bge_http` / `macrolens` 走 `/rerank`，返回 `{"scores": [...]}`（顺序与输入一致）。
+- **两个 base_url 的后缀相反**：embedding 走 OpenAI SDK，`base_url` **必须带 `/v1`**；
+  reranker 自己拼 `/v1/rerank`，`base_url` **不带 `/v1`**（写了会被容错去掉）。
+  embedding 与 reranker 来自同一服务商时，host 相同、后缀不同，是最容易配错的地方。
+- **reranker 认证**：`RERANK_API_KEY` 未设置时回落到 `EMBED_API_KEY`（同一服务商只配一个即可）。
+  key 为空则不发 `Authorization` 头，保持自建 TEI / llama.cpp 的原有行为。
 - **换 embedding 模型要看维度**：`chunks.embedding` 是 `vector(1024)`，维度变了必须改表结构 + 全量重灌。
 - **可观测性**：配 `.env` 的 `LANGFUSE_*` 后，在线问答自动上报 trace 树、`eval_experiment` 上报 Experiment scores；未配则完全 no-op（见 `lex_rag/tracing.py`）。
 

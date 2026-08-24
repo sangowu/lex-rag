@@ -92,3 +92,55 @@ def test_bge_http_provider_posts_query_and_texts_and_parses_scores():
     called_url, called_kwargs = mock_post.call_args[0][0], mock_post.call_args[1]
     assert called_url == "http://10.0.0.5:8000/rerank"
     assert called_kwargs["json"] == {"query": "query", "texts": ["a", "b"]}
+
+
+# ── 认证与 base_url 约定（换云服务商后才暴露出来的两个坑）──
+
+def _cloud_cfg(base_url: str = "https://api.example.com", api_key: str = "sk-test") -> RerankConfig:
+    cfg = _cfg()
+    return RerankConfig(
+        enabled=True, provider="direct", model=cfg.model, base_url=base_url,
+        api_key=api_key, batch_size=32, max_retries=0, retry_backoff_sec=0.0,
+    )
+
+
+def test_direct_provider_sends_bearer_token():
+    """自建 TEI 不校验认证，云服务商会 401 —— api_key 非空时必须带 Authorization。"""
+    client = RerankClient(_cloud_cfg())
+
+    with patch("lex_rag.reranker.requests.post") as mock_post:
+        mock_post.return_value.json.return_value = {"results": [{"index": 0, "score": 0.5}]}
+        mock_post.return_value.raise_for_status.return_value = None
+        client._score_batch("query", ["a"])
+
+    assert mock_post.call_args[1]["headers"] == {"Authorization": "Bearer sk-test"}
+
+
+def test_no_auth_header_when_api_key_is_empty():
+    """自建服务留空 key 时保持原行为，不要发一个空 Bearer。"""
+    client = RerankClient(_cloud_cfg(api_key=""))
+
+    with patch("lex_rag.reranker.requests.post") as mock_post:
+        mock_post.return_value.json.return_value = {"results": [{"index": 0, "score": 0.5}]}
+        mock_post.return_value.raise_for_status.return_value = None
+        client._score_batch("query", ["a"])
+
+    assert mock_post.call_args[1]["headers"] == {}
+
+
+def test_base_url_with_v1_suffix_is_not_doubled():
+    """embedding 的 base_url 必须带 /v1，同一服务商配 reranker 时极易照抄。"""
+    assert RerankClient(_cloud_cfg("https://api.example.com/v1"))._url ==         "https://api.example.com/v1/rerank"
+    assert RerankClient(_cloud_cfg("https://api.example.com"))._url ==         "https://api.example.com/v1/rerank"
+
+
+def test_truncated_results_warn_and_default_to_zero():
+    """服务端 top_n 截断时，缺失文档按 0.0 计分并出声告警。"""
+    client = RerankClient(_cloud_cfg())
+
+    with patch("lex_rag.reranker.requests.post") as mock_post:
+        mock_post.return_value.json.return_value = {"results": [{"index": 1, "relevance_score": 0.9}]}
+        mock_post.return_value.raise_for_status.return_value = None
+        scores = client._score_batch("query", ["a", "b", "c"])
+
+    assert scores == [0.0, 0.9, 0.0]
