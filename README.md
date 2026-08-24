@@ -131,7 +131,7 @@ MinerU `hybrid-auto-engine` on **OmniDocBench** (1615 samples):
 ### Prerequisites
 
 1. **PostgreSQL with the `pgvector` extension** (`CREATE EXTENSION vector;`). Schema and indexes are created automatically on first ingest.
-2. **An embedding + reranker endpoint** exposing an OpenAI-compatible API at `http://127.0.0.1:6006` (e.g. a local or remote GPU running the models above). For a remote GPU, set `provider: ssh_tunnel` in `config.yaml` and the app opens the port-forward for you.
+2. **An embedding endpoint and a reranker endpoint** — set `embedding.base_url` and `reranker.base_url` in `config.yaml` (both ship as `REPLACE-ME-*` placeholders). They may point at the same service or at two different ones; the embedding side expects an OpenAI-compatible `/v1/embeddings`. For a remote GPU, set `provider: ssh_tunnel` and the app opens the port-forward for you.
 3. **A Gemini API key** (used for generation, and for the optional Contextual-RAG / HyDE / agentic features).
 
 ### Install
