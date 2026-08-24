@@ -1,7 +1,9 @@
 embedding:
   provider: direct            # direct | ssh_tunnel
   model: Qwen/Qwen3-Embedding-0.6B
-  base_url: http://127.0.0.1:8081/v1   # 本地 llama.cpp（Qwen3-Embedding-0.6B-f16.gguf）
+  # TODO: 填新模型提供商的 embedding endpoint（本地 llama.cpp 已移除）。
+  # 故意留成无法解析的占位值：置空会让 OpenAI SDK 回落到官方 api.openai.com，静默走错服务。
+  base_url: http://REPLACE-ME-embedding-endpoint/v1
   batch_size: 16
   max_retries: 2
   retry_backoff_sec: 1.0
@@ -26,9 +28,10 @@ retrieval:
 
 reranker:
   enabled: false              # true 时 pipeline.query() 自动 rerank（或用 --reranker 覆盖）
-  provider: direct            # direct(TEI/llama.cpp) | bge_http | macrolens
+  provider: direct            # direct(TEI 风格 /v1/rerank) | bge_http | macrolens
   model: BAAI/bge-reranker-v2-m3
-  base_url: http://127.0.0.1:6006   # 本地 llama.cpp reranking（bge-reranker-v2-m3-FP16.gguf）
+  # TODO: 填新模型提供商的 reranker endpoint（本地 llama.cpp 已移除）。
+  base_url: http://REPLACE-ME-reranker-endpoint
   batch_size: 8
   max_retries: 3
   retry_backoff_sec: 1.0

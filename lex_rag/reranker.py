@@ -59,7 +59,7 @@ class RerankClient:
             results = resp.json()["results"]   # [{"index": i, "score"/"relevance_score": f}, ...]
             scores = [0.0] * len(texts)
             for item in results:
-                # TEI 返回 "score"；llama.cpp reranking 返回 "relevance_score"
+                # TEI 返回 "score"；部分实现（Cohere 风格）返回 "relevance_score"
                 scores[item["index"]] = item.get("score", item.get("relevance_score", 0.0))
             return scores
         raise RuntimeError(f"_score_batch failed after {self.cfg.max_retries} retries") from last_error

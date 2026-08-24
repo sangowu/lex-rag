@@ -63,49 +63,43 @@ uv run scripts/ingest_ocr.py --input-dir data/scanned_docs --api-url http://127.
 uv run scripts/ingest_ocr.py --input-dir data/scanned_docs --table chunks_ocr --no-truncate  # 增量追加
 ```
 
-## 本地模型运行（脱离远程 GPU，全本地推理）
+## 本地运行（模型服务）
 
-用本地模型替代远程 GPU（SSH 隧道）跑通全链路：embedding 与 reranker 各起一个 **llama.cpp** 实例，
-生成/Judge 仍用云端 Gemini。`config.yaml` 已指向本地端点（embedding→8081、reranker→6006、DB→5433）。
+> **模型接入层重建中**：原先由两个本地 **llama.cpp** 实例提供的 embedding（:8081）与
+> reranker（:6006）已全部移除，`config.yaml` 里 `embedding.base_url` / `reranker.base_url`
+> 目前是占位值，需按新的模型提供商填写后才能跑通全链路。生成 / Judge 仍走 Gemini。
 
-**按顺序启动三个服务，再跑 ingest / eval：**
+**启动顺序：先起向量库与模型服务，再跑 ingest / eval：**
 ```bash
 # 1. 向量库（lex_rag 自己的 docker pgvector；host 5432 被 rag_demo 占用，故映射到 5433）
 docker compose up -d db
 
-# 2. Embedding —— llama.cpp（OpenAI 兼容 /v1）
-#    注意 -c 4096：CUAD 合同存在长 chunk（曾见单 chunk 2570 token），-c 2048 会 400 溢出；
-#    -ub 必须 >= 最长 chunk token 数（embedding 单序列需装进一个 ubatch）；-np 1 省 8GB 显存。
-llama.cpp/llama-server.exe -m llama.cpp/models/Qwen3-Embedding-0.6B-f16.gguf \
-    --embedding --pooling last -ngl 99 -c 4096 -b 4096 -ub 4096 -np 1 --host 127.0.0.1 --port 8081
+# 2. Embedding / Reranker 服务 —— 端点见 config.yaml 的 embedding.base_url / reranker.base_url
 
-# 3. Reranker —— llama.cpp 原生 reranking（无需 torch/FlagEmbedding）
-#    GGUF: gpustack/bge-reranker-v2-m3-GGUF（bge-reranker-v2-m3-FP16.gguf, ~1.1GB）
-llama.cpp/llama-server.exe -m llama.cpp/models/bge-reranker-v2-m3-FP16.gguf \
-    --reranking --pooling rank -ngl 99 -c 4096 -b 4096 -ub 4096 -np 1 --host 127.0.0.1 --port 6006
-
-# 4. 换模型后必须清旧向量缓存并重灌（否则新旧模型向量混用）
+# 3. 换 embedding 模型后必须清旧向量缓存并重灌（否则新旧模型向量混用）
 uv run scripts/ingest.py --refresh-cache        # 清 embed_cache.pkl + 重建 chunks 表
 rm -f data/embed_cache_eval.pkl                 # eval 语义相似度用的缓存也要清
 
-# 5. 评估（Langfuse Dataset + Experiment，跨 run 对比）
-uv run scripts/eval_experiment.py --sync-dataset --limit 30 --run-name local-noreranker
-uv run scripts/eval_experiment.py --limit 30 --reranker --run-name local-reranker
+# 4. 评估（Langfuse Dataset + Experiment，跨 run 对比）
+uv run scripts/eval_experiment.py --sync-dataset --limit 30 --run-name noreranker
+uv run scripts/eval_experiment.py --limit 30 --reranker --run-name reranker
 
-# 6. 在线问答（同时验证 Langfuse trace 树）
+# 5. 在线问答（同时验证 Langfuse trace 树）
 uv run scripts/serve.py                          # http://127.0.0.1:6800/ui
 ```
 
 **关键约束：**
-- **reranker 接口差异**：llama.cpp reranking 返回 `relevance_score`，TEI 返回 `score`——`reranker.py` 的 `direct` provider 已兼容两者。`config.yaml` 用 `provider: direct`。（另有 `macrolens` provider 兼容 MacroLens `cloud_server` 的 `/rerank {query,documents}→{scores}`。）
-- **显存**：GPU 仅 8GB，embedding + reranker 两个 llama.cpp 实例约共占 ~5GB；`-ub 8192` 会 CUDA OOM，故用 4096 + `-np 1`。
+- **reranker 响应格式**：`direct` provider 走 `/v1/rerank`，解析 TEI 风格
+  `{"results": [{"index", "score"}]}`，并兼容把分数命名为 `relevance_score` 的实现；
+  `bge_http` / `macrolens` 走 `/rerank`，返回 `{"scores": [...]}`（顺序与输入一致）。
+- **换 embedding 模型要看维度**：`chunks.embedding` 是 `vector(1024)`，维度变了必须改表结构 + 全量重灌。
 - **可观测性**：配 `.env` 的 `LANGFUSE_*` 后，在线问答自动上报 trace 树、`eval_experiment` 上报 Experiment scores；未配则完全 no-op（见 `lex_rag/tracing.py`）。
 
 ## 环境配置
 
 `.env` 需包含（参考 `.env.example`）：
 ```
-EMBED_API_KEY=...      # embedding 服务认证（本地 llama.cpp 可填任意值）
+EMBED_API_KEY=...      # embedding 服务认证
 PG_PASSWORD=...        # PostgreSQL 密码
 GEMINI_API_KEY=...     # Contextual RAG（--contextual 时必须）
 LANGFUSE_PUBLIC_KEY=…  # 可选：LLM 可观测性（留空则 no-op）
@@ -238,6 +232,6 @@ eval_ocr.py（本地）
 
 - **API + UI 已合并为单一进程**：`serve.py` 通过 `gr.mount_gradio_app()` 在同一进程内同时提供 REST API（`/query`）和 Gradio UI（`/ui`），共享同一 `VectorStore` 连接，无锁竞争。`ui.py` 已删除。
 - **切换 contextual 模式必须完整重新 ingest**（TRUNCATE + 重建），`ON CONFLICT DO NOTHING` 不会更新已有行
-- Embedding 服务和 Reranker 服务共用同一个本地 endpoint（`http://127.0.0.1:6006`），需要提前启动；远程 GPU 时通过 `provider: ssh_tunnel` 配置 SSH 端口转发
+- Embedding / Reranker endpoint 由 `config.yaml` 的 `embedding.base_url` / `reranker.base_url` 指定，需要提前启动；两者可以是同一个服务，也可以分开。远程 GPU 时通过 `provider: ssh_tunnel` 配置 SSH 端口转发
 - OCR 服务（MinerU）与 embedding 服务共用远端端口 1080，不同时运行；`eval_ocr.py` 所有 multipart 字段统一放入 `files=` 参数（`(None, value)` 格式），禁止同时传 `files=` 和 `data=`（httpx + h11 合并 body 时会产生 tuple 类型错误）
 - Grid search 中 `data/runs/grid/20260522T*` 两次历史结果因 BM25 bug 无效，不可引用
