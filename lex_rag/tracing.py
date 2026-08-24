@@ -7,7 +7,7 @@
 
 用法（在 generator 内）::
 
-    gen = start_generation("gemini.generate", model, prompt)
+    gen = start_generation("llm.generate", model, prompt)
     resp = ...                       # 真实 LLM 调用，永远执行，不受追踪影响
     end_generation(gen, output=text, input_tokens=..., output_tokens=...)
 
@@ -118,18 +118,19 @@ def trace_span(name: str, input_data: Any = None) -> Iterator[None]:
                 span.__exit__(None, None, None)
 
 
-def genai_usage(resp: Any) -> tuple[int | None, int | None]:
-    """从 google-genai 响应中安全提取 (prompt_tokens, output_tokens)。
+def chat_usage(resp: Any) -> tuple[int | None, int | None]:
+    """从 OpenAI 风格响应中安全提取 (prompt_tokens, completion_tokens)。
 
-    字段缺失或结构异常时返回 (None, None)，绝不抛异常。
+    流式响应里多数 chunk 没有 usage（只有开了 include_usage 的最后一个才有），
+    所以字段缺失是常态而非异常：一律返回 (None, None)，绝不抛。
     """
     try:
-        meta = getattr(resp, "usage_metadata", None)
-        if meta is None:
+        usage = getattr(resp, "usage", None)
+        if usage is None:
             return None, None
         return (
-            getattr(meta, "prompt_token_count", None),
-            getattr(meta, "candidates_token_count", None),
+            getattr(usage, "prompt_tokens", None),
+            getattr(usage, "completion_tokens", None),
         )
     except Exception:
         return None, None

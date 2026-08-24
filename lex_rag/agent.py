@@ -22,6 +22,7 @@ from typing import Iterator
 
 from lex_rag.chunking import ChunkWindow
 from lex_rag.config import ContextualConfig
+from lex_rag.llm import ChatClient
 from lex_rag.pipeline import RAGPipeline
 
 _REWRITE_PROMPT = """\
@@ -59,22 +60,15 @@ class AgenticPipeline:
         self.pipeline = pipeline
         self.cfg = cfg
         self.max_iterations = max_iterations
-        self._client = None
-
-    def _get_client(self):
-        if self._client is None:
-            from google import genai
-            self._client = genai.Client(api_key=self.cfg.api_key)
-        return self._client
+        self._chat = ChatClient.from_config(cfg)
 
     def _rewrite_query(self, question: str, failed_query: str) -> str:
         prompt = _REWRITE_PROMPT.format(question=question, query=failed_query)
         try:
-            client = self._get_client()
-            resp = client.models.generate_content(model=self.cfg.model, contents=prompt)
-            rewritten = (resp.text or "").strip()
+            rewritten = self._chat.complete(prompt, trace_name="agent.rewrite_query")
             return rewritten if rewritten and rewritten != failed_query else failed_query
         except Exception:
+            # 重写失败不该让整次检索失败：退回原查询，上层照常继续
             return failed_query
 
     def query_stream(

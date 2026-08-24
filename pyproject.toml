@@ -16,7 +16,6 @@ dependencies = [
     "pgvector>=0.2",         # pgvector Python client
     "tqdm>=4.66",            # progress bars
     "numpy>=1.26",           # vector ops
-    "google-genai>=1.0",         # Gemini API (Contextual RAG)
     "ragas>=0.4.3",
     "fastapi>=0.115",             # REST API (scripts/serve.py)
     "uvicorn[standard]>=0.34",   # ASGI server (scripts/serve.py)
