@@ -155,16 +155,24 @@ def run_ragas(samples: list[dict], cfg: RagasConfig) -> dict:
     chat = ChatClient.from_config(cfg)
     min_interval = 60.0 / cfg.rpm_limit
     last_call = 0.0
+    n_failed = 0
 
     def _call(prompt: str) -> dict:
         nonlocal last_call
         elapsed = time.monotonic() - last_call
         if elapsed < min_interval:
             time.sleep(min_interval - elapsed)
-        data = chat.complete_json(prompt, trace_name="judge")
+        nonlocal n_failed
+        try:
+            data = chat.complete_json(prompt, trace_name="judge")
+        except Exception as e:
+            # 单条 judge 失败（多为 429）不该让整轮评测白跑：记中性分继续。
+            # n_failed 会写进结果，避免"看起来跑完了其实一半是兜底分"。
+            n_failed += 1
+            last_call = time.monotonic()
+            return {"score": 0.5, "reason": f"llm error: {type(e).__name__}"}
         last_call = time.monotonic()
-        # complete_json 解析失败会返回 {}，这里按中性分处理，
-        # 不让单条判分失败中断整批评测
+        # complete_json 解析失败会返回 {}，这里同样按中性分处理
         return data or {"score": 0.5, "reason": "parse error"}
 
     faithfulness_scores, relevancy_scores = [], []
@@ -187,10 +195,14 @@ def run_ragas(samples: list[dict], cfg: RagasConfig) -> dict:
             "answer_relevancy": r,
         })
 
+    if n_failed:
+        print(f"  ⚠️ {n_failed}/{len(samples) * 2} 次 judge 调用失败，已按中性分 0.5 计入", flush=True)
+
     return {
         "faithfulness":      sum(faithfulness_scores) / len(faithfulness_scores),
         "answer_relevancy":  sum(relevancy_scores) / len(relevancy_scores),
         "n_samples":         len(samples),
+        "n_judge_failed":    n_failed,
         "per_sample":        per_sample,
     }
 
@@ -319,7 +331,12 @@ def run_eval(args) -> None:
 
     if args.ragas and ragas_samples:
         print(f"\n[LLM-Judge] 评估 {len(ragas_samples)} 条样本（model={cfg.ragas.model}）...")
-        metrics["ragas"] = run_ragas(ragas_samples, cfg.ragas)
+        # judge 是可选的附加指标：它失败不该丢掉已经跑完的 200 条生成结果
+        try:
+            metrics["ragas"] = run_ragas(ragas_samples, cfg.ragas)
+        except Exception as e:
+            print(f"⚠️ LLM-Judge 阶段失败，主指标照常保存：{type(e).__name__}: {e}", flush=True)
+            metrics["ragas"] = {"error": f"{type(e).__name__}: {e}"}
 
     # ---------------------------------------------------------------------------
     # 打印 & 保存

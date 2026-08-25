@@ -78,6 +78,7 @@ class ContextualConfig:
     retry_backoff_sec: float
     section_chars: int = 3000  # HierarchicalContextualizer 的 section 切分大小
     base_url: str = "https://api.z.ai/api/paas/v4/"  # OpenAI 兼容 endpoint
+    thinking: bool | None = None   # Z.ai 思考链：None=不发该字段 / False=关闭 / True=开启
 
 @dataclass
 class ParentChildConfig:
@@ -91,6 +92,7 @@ class RagasConfig:
     api_key: str = ""
     rpm_limit: int = 60
     base_url: str = "https://api.z.ai/api/paas/v4/"
+    thinking: bool | None = None
 
 @dataclass
 class AppConfig:
@@ -189,6 +191,7 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         retry_backoff_sec=ctx.get("retry_backoff_sec", 2.0),
         section_chars=ctx.get("section_chars", 3000),
         base_url=ctx.get("base_url", "https://api.z.ai/api/paas/v4/"),
+        thinking=ctx.get("thinking", None),
     )
 
     pc = config_dict.get("parent_child", {})
@@ -209,6 +212,7 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         api_key=os.environ.get("GENERATE_MODEL_API", ""),
         rpm_limit=rg.get("rpm_limit", 60),
         base_url=rg.get("base_url", "https://api.z.ai/api/paas/v4/"),
+        thinking=rg.get("thinking", None),
     )
 
     return AppConfig(

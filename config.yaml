@@ -34,13 +34,16 @@ reranker:
   # reranker.py 自己拼 /v1/rerank，多余的 /v1 会被容错去掉。
   # 认证用 .env 的 RERANK_API_KEY，未设置则回落到 EMBED_API_KEY。
   base_url: https://api.siliconflow.cn/v1
-  batch_size: 8
+  # 与 rerank_top_k 对齐，让一次查询只打一个 rerank 请求。
+  # 原值 8 是本地 8GB 显存 GPU 时期的显存约束；换成托管 API 后每查询要打 8 次
+  # 往返，实测 10.3 s/条，改成 60 后单请求约 2s。
+  batch_size: 60
   max_retries: 3
   retry_backoff_sec: 1.0
 
 database:
   host: localhost
-  port: 5433                   # lex_rag 自己的 docker pgvector（host 5432 被 rag_demo 占用）
+  port: 5434                   # lex_rag 自己的 docker pgvector（5432 被 rag_demo、5433 被 paralegal 占用）
   name: legal_rag_v1
   user: rag
   table: chunks                # 切换到 chunks_contextual 可对比 contextual RAG 效果
@@ -56,6 +59,9 @@ contextual:
   enabled: false              # true 时 ingest 阶段为每个 chunk 调用 LLM 生成上下文前缀
   model: glm-4.7-flash
   base_url: https://api.z.ai/api/paas/v4/   # Z.ai，OpenAI 兼容；key 取自 .env 的 GENERATE_MODEL_API
+  # GLM-4.5+ 默认开启思考链。抽取式问答用不上，且实测输出 token 多 13 倍（376 vs 28）。
+  # 换到不认识 thinking 字段的服务商时改成 null（整个字段不会发送）。
+  thinking: false
   rpm_limit: 120               # 控制 API 调用频率
   max_retries: 3
   retry_backoff_sec: 2.0      # 指数退避基数（秒）
@@ -76,4 +82,5 @@ parent_child:
 ragas:
   model: glm-4.7-flash           # judge 模型；条件允许时建议换成强于 generation 的模型
   base_url: https://api.z.ai/api/paas/v4/
+  thinking: false
   rpm_limit: 60                  # RAGAS 每轮评估会多次调用 LLM，注意限速

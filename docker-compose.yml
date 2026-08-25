@@ -6,7 +6,8 @@ services:
       POSTGRES_USER: rag
       POSTGRES_PASSWORD: ${PG_PASSWORD}
     ports:
-      - "5433:5432"   # host 5432 already taken by rag_demo-postgres-1
+      # host 5432 被 rag_demo-postgres-1 占用；5433 被 paralegal-db-1 占用，故用 5434
+      - "5434:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -21,8 +22,10 @@ services:
       - "6800:6800"
     environment:
       - EMBED_API_KEY=${EMBED_API_KEY}
+      - RERANK_API_KEY=${RERANK_API_KEY}
       - PG_PASSWORD=${PG_PASSWORD}
-      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GENERATE_MODEL_API=${GENERATE_MODEL_API}
+      - MINERU_API_TOKEN=${MINERU_API_TOKEN}
     volumes:
       - ./config.docker.yaml:/app/config.yaml:ro
     depends_on:

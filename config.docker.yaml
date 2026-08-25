@@ -29,7 +29,7 @@ reranker:
   provider: direct            # direct | ssh_tunnel | bge_http
   model: BAAI/bge-reranker-v2-m3
   base_url: https://api.siliconflow.cn/v1   # SiliconFlow (same host as embedding)
-  batch_size: 8
+  batch_size: 60
   max_retries: 3
   retry_backoff_sec: 1.0
 
