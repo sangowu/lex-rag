@@ -19,6 +19,19 @@ from lex_rag.chunking import ChunkWindow
 from lex_rag.config import ContextualConfig
 from lex_rag.llm import ChatClient
 
+# 供 structured_output="json_schema" 时做服务端强制约束用。
+# json_object 模式下不发送——那时结构只靠 prompt 约束，_parse_response 的字段
+# 缺省逻辑是唯一防线。
+_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "refused": {"type": "boolean"},
+        "answer": {"type": "string"},
+    },
+    "required": ["refused", "answer"],
+    "additionalProperties": False,
+}
+
 _GENERATE_PROMPT = """\
 You are a legal contract analysis assistant. Answer questions based ONLY on the contract excerpts provided.
 
@@ -183,7 +196,8 @@ class LegalGenerator:
 
     def _call_llm(self, prompt: str) -> dict:
         """JSON mode 调用，返回解析后的 dict。重试与 tracing 都在 ChatClient 里。"""
-        return self._chat.complete_json(prompt, trace_name="generator.generate")
+        return self._chat.complete_json(prompt, schema=_RESPONSE_SCHEMA,
+                                        trace_name="generator.generate")
 
     def generate_stream(
         self,
@@ -225,7 +239,7 @@ class LegalGenerator:
         escaped = False      # 上一个字符是否为反斜杠
 
         try:
-            for token in self._chat.stream(prompt, json_mode=True,
+            for token in self._chat.stream(prompt, json_mode=True, schema=_RESPONSE_SCHEMA,
                                            trace_name="generator.generate_stream"):
                 full_text += token
 

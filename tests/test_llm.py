@@ -120,8 +120,8 @@ def test_from_config_reads_base_url_from_config():
 
 
 def test_thinking_field_is_omitted_by_default_and_sent_when_set():
-    """thinking 是 Z.ai 专有字段：不配时整个字段不发，换服务商才不会 400。"""
-    c = _client()
+    """thinking 是服务商专有字段：不配时整个字段不发，换服务商才不会 400。"""
+    c = _client(thinking_style="zai")
     c._client.chat.completions.create.return_value = _resp("{}")
 
     c.complete("p")
@@ -162,3 +162,29 @@ def test_rate_limit_errors_back_off_harder_than_generic_errors():
     assert c._backoff_sec(limited, 1) == 8.0
     assert c._backoff_sec(limited, 2) > c._backoff_sec(generic, 2)
     assert c._backoff_sec(limited, 10) == 60.0        # 封顶，不会退避到天荒地老
+
+
+# ── 多服务商的思考开关传参形式 ──────────────────────────────────
+
+def test_thinking_wire_format_differs_per_provider():
+    """同一个语义开关，Z.ai 与 DashScope 的参数名不同，必须按 base_url 分流。"""
+    zai = ChatClient(base_url="https://api.z.ai/api/paas/v4/", thinking=False)
+    dash = ChatClient(base_url="https://dashscope.aliyuncs.com/compatible-mode/v1", thinking=False)
+
+    assert zai._extra_body() == {"extra_body": {"thinking": {"type": "disabled"}}}
+    assert dash._extra_body() == {"extra_body": {"enable_thinking": False}}
+    assert dash.__class__(base_url=dash.base_url, thinking=True)._extra_body() == {
+        "extra_body": {"enable_thinking": True}
+    }
+
+
+def test_unknown_provider_sends_no_thinking_field():
+    """认不出的服务商不发该字段，好过发一个对方不认识的参数换来 400。"""
+    c = ChatClient(base_url="https://api.example.com/v1", thinking=False)
+    assert c._extra_body() == {}
+
+
+def test_explicit_thinking_style_overrides_inference():
+    c = ChatClient(base_url="https://api.example.com/v1", thinking=True,
+                   thinking_style="dashscope")
+    assert c._extra_body() == {"extra_body": {"enable_thinking": True}}
