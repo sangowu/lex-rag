@@ -21,6 +21,7 @@ OCR → RAG 端到端 ingest 脚本。
 from __future__ import annotations
 
 from dataclasses import replace
+import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -55,6 +56,13 @@ def main() -> None:
                         help="为每个 chunk 调用 Gemini 生成上下文前缀")
     ocr.add_ocr_args(parser)
     args = parser.parse_args()
+    # Windows 控制台默认 GBK，遇到 emoji 会抛 UnicodeEncodeError —— 重设为 utf-8。
+    # 与 eval_experiment.py 的处理保持一致。
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
     args.batch_size = max(1, min(args.batch_size, ocr.MAX_BATCH_FILES))
     load_dotenv()          # MINERU_API_TOKEN
 
