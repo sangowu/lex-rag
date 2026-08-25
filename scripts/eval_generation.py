@@ -16,6 +16,7 @@ import argparse
 import sys
 import json
 import math
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
@@ -213,6 +214,46 @@ def run_ragas(samples: list[dict], cfg: RagasConfig) -> dict:
 # 主流程
 # ---------------------------------------------------------------------------
 
+def _prompt_fingerprint() -> str:
+    """生成 prompt 的短哈希，用来回答"这两轮跑的是不是同一版 prompt"。"""
+    import hashlib
+
+    from lex_rag.generator import _GENERATE_PROMPT, _MULTI_DOC_NOTE
+    blob = (_GENERATE_PROMPT + _MULTI_DOC_NOTE).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()[:12]
+
+
+def _git_commit() -> str | None:
+    """当前 commit，便于把结果文件对回代码。不在 git 仓库或 git 不可用时返回 None。"""
+    import subprocess
+    try:
+        r = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                           capture_output=True, text=True, timeout=5)
+        return r.stdout.strip() or None
+    except Exception:
+        return None
+
+
+def _error_kind(err: str) -> str:
+    """把错误信息压成可统计的类别。
+
+    不存原文：错误里可能带 request id 之类的变量，直接计数会散成一堆只出现
+    一次的键，失去统计意义。
+    """
+    e = str(err)
+    for needle, kind in (
+        ("FreeTierOnly", "quota_exhausted_403"),
+        ("429", "rate_limited_429"),
+        ("401", "auth_401"),
+        ("403", "forbidden_403"),
+        ("timeout", "timeout"),
+        ("Timeout", "timeout"),
+    ):
+        if needle in e:
+            return kind
+    return type(err).__name__ if isinstance(err, Exception) else e[:60]
+
+
 def run_eval(args) -> None:
     cfg = load_config()
     if args.reranker:
@@ -231,6 +272,7 @@ def run_eval(args) -> None:
     no_answer_total = 0
     tp = tn = fp = fn = 0
     errors = 0
+    error_samples: Counter = Counter()
     total_latency_ms = 0.0
 
     ragas_samples: list[dict] = []
@@ -254,6 +296,9 @@ def run_eval(args) -> None:
 
         if result.error:
             errors += 1
+            # 只计数不记类型的话，跑完只剩一个 errors=163，看不出是配额、限流
+            # 还是请求格式问题——上一轮就是这样，只能另发一次请求才查得出来。
+            error_samples[_error_kind(result.error)] += 1
             continue
 
         total_latency_ms += result.latency_ms
@@ -318,6 +363,7 @@ def run_eval(args) -> None:
     n_evaluated = len(per_item_rows)
     metrics: dict = {
         "n_evaluated": n_evaluated,
+        "error_kinds": dict(error_samples),
         "errors": errors,
         "sim_threshold": args.sim_threshold,
         # 语义相似度命中率（has_answer=True 子集）
@@ -331,6 +377,34 @@ def run_eval(args) -> None:
         "avg_latency_ms": total_latency_ms / max(1, n_evaluated),
     }
 
+    # ── 实验记录 ────────────────────────────────────────────────
+    # 没有这一段的话，两个结果文件之间的差异只能靠时间戳和记忆去还原——做模型
+    # 横评时这是硬伤：过两周没人说得清某个基线是哪个配置跑出来的。
+    # prompt 用哈希而不是全文：全文太长，而哈希足以回答"这两轮 prompt 是否相同"。
+    provenance = {
+        "generation_model": cfg.contextual.model,
+        "generation_base_url": cfg.contextual.base_url,
+        "generation_thinking": cfg.contextual.thinking,
+        "structured_output": cfg.contextual.structured_output,
+        "judge_model": cfg.ragas.model if args.ragas else None,
+        "judge_base_url": cfg.ragas.base_url if args.ragas else None,
+        "prompt_sha256_12": _prompt_fingerprint(),
+        "embedding_model": cfg.embedding.model,
+        "reranker_model": cfg.reranker.model if cfg.reranker.enabled else None,
+        "reranker_enabled": cfg.reranker.enabled,
+        "table": cfg.database.table,
+        "limit": args.limit,
+        "generate_k": args.generate_k,
+        "sim_threshold": args.sim_threshold,
+        "corpus_mode": args.corpus,
+        "git_commit": _git_commit(),
+        "ts": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+    print(f"[provenance] gen={provenance['generation_model']} "
+          f"thinking={provenance['generation_thinking']} "
+          f"judge={provenance['judge_model']} "
+          f"prompt={provenance['prompt_sha256_12']}", flush=True)
+
     out_dir = Path("data/runs/gen_eval")
     out_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%dT%H%M%SZ")
@@ -338,7 +412,8 @@ def run_eval(args) -> None:
 
     def _save() -> None:
         out_path.write_text(
-            json.dumps({"metrics": metrics, "per_item": per_item_rows},
+            json.dumps({"provenance": provenance, "metrics": metrics,
+                        "per_item": per_item_rows},
                        ensure_ascii=False, indent=2),
             encoding="utf-8",
         )

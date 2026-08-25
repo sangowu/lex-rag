@@ -57,7 +57,7 @@ evaluation:
 # enabled 只控制 ingest 阶段的 Contextual RAG；生成、HyDE 等不看这个字段。
 contextual:
   enabled: false              # true 时 ingest 阶段为每个 chunk 调用 LLM 生成上下文前缀
-  model: deepseek-v4-flash-0731
+  model: qwen3.7-flash
   base_url: https://dashscope.aliyuncs.com/compatible-mode/v1   # DashScope，OpenAI 兼容
   # thinking 在 deepseek 上是净收益：横评里误拒从 0.50 降到 0.20，判别力 J 从
   # 0.50 升到 0.80（data/runs/bakeoff/20260825T174242Z.json）。代价是延迟从

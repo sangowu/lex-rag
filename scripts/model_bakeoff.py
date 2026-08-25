@@ -234,9 +234,26 @@ def main() -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     out = OUT_DIR / f"{ts}.json"
+    # prompt 会直接影响拒答倾向，所以它的指纹必须跟结果存在一起：
+    # 同一个模型换一版 prompt 就是另一个实验。
+    import hashlib
+    import subprocess
+
+    from lex_rag.generator import _GENERATE_PROMPT, _MULTI_DOC_NOTE
+    prompt_fp = hashlib.sha256((_GENERATE_PROMPT + _MULTI_DOC_NOTE).encode("utf-8")).hexdigest()[:12]
+    try:
+        commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                                capture_output=True, text=True, timeout=5).stdout.strip() or None
+    except Exception:
+        commit = None
+
     out.write_text(json.dumps({
         "run_id": ts,
         "diagnostic_source": source,
+        "prompt_sha256_12": prompt_fp,
+        "git_commit": commit,
+        "embedding_model": cfg.embedding.model,
+        "reranker_model": cfg.reranker.model,
         "n_per_subset": args.n,
         "generate_k": args.generate_k,
         "results": results,
