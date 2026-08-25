@@ -13,6 +13,7 @@ Generation 层评估脚本
 from __future__ import annotations
 
 import argparse
+import sys
 import json
 import math
 from datetime import datetime
@@ -196,7 +197,8 @@ def run_ragas(samples: list[dict], cfg: RagasConfig) -> dict:
         })
 
     if n_failed:
-        print(f"  ⚠️ {n_failed}/{len(samples) * 2} 次 judge 调用失败，已按中性分 0.5 计入", flush=True)
+        print(f"  [warn] {n_failed}/{len(samples) * 2} 次 judge 调用失败，已按中性分 0.5 计入",
+              flush=True)
 
     return {
         "faithfulness":      sum(faithfulness_scores) / len(faithfulness_scores),
@@ -329,14 +331,32 @@ def run_eval(args) -> None:
         "avg_latency_ms": total_latency_ms / max(1, n_evaluated),
     }
 
+    out_dir = Path("data/runs/gen_eval")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%dT%H%M%SZ")
+    out_path = out_dir / f"{ts}.json"
+
+    def _save() -> None:
+        out_path.write_text(
+            json.dumps({"metrics": metrics, "per_item": per_item_rows},
+                       ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    # 主指标先落盘再跑 judge。上一版只用 try/except 包住 judge，但那个 except 自己
+    # 也会失败（print 的 emoji 在 GBK 控制台上抛 UnicodeEncodeError），50 条结果
+    # 照样丢光。落盘早于一切可能出错的后续步骤，才是真正的保险。
+    _save()
+    print(f"[saved] 主指标已写入 {out_path}", flush=True)
+
     if args.ragas and ragas_samples:
         print(f"\n[LLM-Judge] 评估 {len(ragas_samples)} 条样本（model={cfg.ragas.model}）...")
-        # judge 是可选的附加指标：它失败不该丢掉已经跑完的 200 条生成结果
         try:
             metrics["ragas"] = run_ragas(ragas_samples, cfg.ragas)
         except Exception as e:
-            print(f"⚠️ LLM-Judge 阶段失败，主指标照常保存：{type(e).__name__}: {e}", flush=True)
+            print(f"[warn] LLM-Judge 阶段失败，主指标已保存：{type(e).__name__}: {e}", flush=True)
             metrics["ragas"] = {"error": f"{type(e).__name__}: {e}"}
+        _save()
 
     # ---------------------------------------------------------------------------
     # 打印 & 保存
@@ -352,14 +372,7 @@ def run_eval(args) -> None:
         print(f"  faithfulness         : {r['faithfulness']:.3f}  (答案忠实度)")
         print(f"  answer_relevancy     : {r['answer_relevancy']:.3f}  (答案相关性)")
 
-    out_dir = Path("data/runs/gen_eval")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%dT%H%M%SZ")
-    out_path = out_dir / f"{ts}.json"
-    out_path.write_text(
-        json.dumps({"metrics": metrics, "per_item": per_item_rows}, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    _save()
     print(f"\nSaved → {out_path}")
 
     pipeline.close()
@@ -434,6 +447,13 @@ def parse_args():
 
 if __name__ == "__main__":
     args = parse_args()
+    # Windows 控制台默认 GBK，遇到 emoji 会抛 UnicodeEncodeError —— 重设为 utf-8。
+    # 与 eval_experiment.py 的处理保持一致。
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
     if args.compare:
         compare_gen_files(args.compare)
     else:

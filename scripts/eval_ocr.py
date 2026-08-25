@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import io
+import sys
 import json
 import re
 import time
@@ -348,6 +349,13 @@ def main() -> None:
                              "可选: academic_literature,research_report,book,PPT2PDF,magazine,exam_paper,newspaper,note")
     ocr.add_ocr_args(parser)
     args = parser.parse_args()
+    # Windows 控制台默认 GBK，遇到 emoji 会抛 UnicodeEncodeError —— 重设为 utf-8。
+    # 与 eval_experiment.py 的处理保持一致。
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
     args.batch_size = max(1, min(args.batch_size, ocr.MAX_BATCH_FILES))
     load_dotenv()          # MINERU_API_TOKEN
     run_eval(args)
