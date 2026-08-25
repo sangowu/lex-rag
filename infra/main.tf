@@ -46,11 +46,13 @@ locals {
   #
   # 不含 MINERU_API_TOKEN：OCR 是独立的离线脚本，不在 serve.py 的服务路径里。
   # 将来若要在容器内跑 ingest_ocr，把它加进这张表即可。
+  # 名字带前导斜杠，与账号里既有的 /proshot/* 命名习惯一致。
+  # SSM 的 GetParameter 按名字精确匹配，少一个斜杠就是 ParameterNotFound。
   runtime_secrets = {
-    PG_PASSWORD        = "${var.service_name}/pg-password"
-    EMBED_API_KEY      = "${var.service_name}/embed-api-key"
-    RERANK_API_KEY     = "${var.service_name}/rerank-api-key"
-    GENERATE_MODEL_API = "${var.service_name}/generate-model-api"
+    PG_PASSWORD        = "/${var.service_name}/pg-password"
+    EMBED_API_KEY      = "/${var.service_name}/embed-api-key"
+    RERANK_API_KEY     = "/${var.service_name}/rerank-api-key"
+    GENERATE_MODEL_API = "/${var.service_name}/generate-model-api"
   }
 
   # 拼出完整的 ECR 镜像地址，替代原来硬编码的
