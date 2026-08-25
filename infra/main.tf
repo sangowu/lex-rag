@@ -36,6 +36,12 @@ data "aws_ssm_parameter" "runtime" {
   with_decryption = false
 }
 
+# SecureString 用的 AWS 托管密钥。取别名而不是硬编码 key id：
+# 换账号/换区域时别名不变，key id 会变。
+data "aws_kms_alias" "ssm" {
+  name = "alias/aws/ssm"
+}
+
 # ---------------------------------------------------------------------------
 # Locals —— 相当于局部变量，用来消除重复。
 # ---------------------------------------------------------------------------
@@ -131,11 +137,8 @@ resource "aws_ecs_task_definition" "app" {
       # 敏感值：只传 ARN，明文不进 Terraform，也不进任务定义。
       # ECS agent 启动容器前自己去 SSM 取，注入成环境变量。
       #
-      # 前提：执行角色（rag-ecs-execution-role）需要有
-      #   ssm:GetParameters  对这些参数 ARN
-      #   kms:Decrypt        对 alias/aws/ssm
-      # 这两个角色是账号里手工建的（上面用 data 引用），本文件不管它们的策略，
-      # 缺权限的表现是任务启动失败并报 ResourceInitializationError。
+      # 前提：执行角色需要有 ssm:GetParameters 与 kms:Decrypt ——
+      # 由本文件末尾的 aws_iam_role_policy.ecs_execution_ssm 提供。
       secrets = [
         for env_name, param_name in local.runtime_secrets : {
           name      = env_name
@@ -156,4 +159,48 @@ resource "aws_ecs_task_definition" "app" {
       }
     }
   ])
+}
+
+# ---------------------------------------------------------------------------
+# 执行角色读取 SSM 密钥的权限
+#
+# 角色本身是账号里手工建的，上面用 data 引用、不归 Terraform 管（destroy 不会
+# 删掉它）。但这条内联策略是本服务专属的，交给 Terraform 管理更合适：权限变更
+# 有 diff 可看，也不会散落在某次手敲的 CLI 里。
+#
+# 权限缺失时的表现是任务启动失败并报 ResourceInitializationError，
+# 而不是容器起来后报错，容易误判成镜像问题。
+#
+# 两条都按最小权限收敛：参数只授权这四个具体 ARN（不用通配符）；kms:Decrypt
+# 加 ViaService 条件，使这把密钥只能经由 SSM 使用，拿不到手也用不到别处。
+# ---------------------------------------------------------------------------
+
+resource "aws_iam_role_policy" "ecs_execution_ssm" {
+  name = "${var.service_name}-ssm-read"
+  role = data.aws_iam_role.ecs_execution.name
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "ReadRuntimeSecrets"
+        Effect = "Allow"
+        # ECS agent 实际调用的是复数形式的 GetParameters；GetParameter 一并给上，
+        # 方便本地用 CLI 排查同一组参数。
+        Action   = ["ssm:GetParameters", "ssm:GetParameter"]
+        Resource = [for k in keys(local.runtime_secrets) : data.aws_ssm_parameter.runtime[k].arn]
+      },
+      {
+        Sid      = "DecryptWithSsmManagedKey"
+        Effect   = "Allow"
+        Action   = ["kms:Decrypt"]
+        Resource = [data.aws_kms_alias.ssm.target_key_arn]
+        Condition = {
+          StringEquals = {
+            "kms:ViaService" = "ssm.${data.aws_region.current.region}.amazonaws.com"
+          }
+        }
+      },
+    ]
+  })
 }
