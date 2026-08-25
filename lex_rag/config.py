@@ -78,7 +78,9 @@ class ContextualConfig:
     retry_backoff_sec: float
     section_chars: int = 3000  # HierarchicalContextualizer 的 section 切分大小
     base_url: str = "https://api.z.ai/api/paas/v4/"  # OpenAI 兼容 endpoint
-    thinking: bool | None = None   # Z.ai 思考链：None=不发该字段 / False=关闭 / True=开启
+    thinking: bool | None = None   # 思考链：None=不发该字段 / False=关闭 / True=开启
+    thinking_style: str = "auto"   # 传参形式：auto（按 base_url 推断）| zai | dashscope | none
+    structured_output: str = "json_object"  # json_object | json_schema（服务端强制结构）
 
 @dataclass
 class ParentChildConfig:
@@ -192,6 +194,8 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         section_chars=ctx.get("section_chars", 3000),
         base_url=ctx.get("base_url", "https://api.z.ai/api/paas/v4/"),
         thinking=ctx.get("thinking", None),
+        thinking_style=ctx.get("thinking_style", "auto"),
+        structured_output=ctx.get("structured_output", "json_object"),
     )
 
     pc = config_dict.get("parent_child", {})
