@@ -8,7 +8,7 @@
 |---|---|---|
 | CloudWatch 日志组 `/ecs/legal-rag-v1` | `aws_cloudwatch_log_group.app` | 已于 2026-07-31 import 纳管 |
 | ECS Task Definition `legal-rag-v1` | `aws_ecs_task_definition.app` | 不可变资源，apply 会产生新 revision（当前 `:3`） |
-| IAM roles / Secrets Manager | `data.*` | 只读引用，Terraform 不管理其生命周期 |
+| IAM roles / SSM 参数 | `data.*` | 只读引用，Terraform 不管理其生命周期 |
 
 **尚未纳管**（后续分批接入）：ECS Service、ALB + Target Group、RDS、EC2 GPU 实例、ECR、安全组、VPC。
 分批的原因见下面「为什么不一次全写」。
@@ -95,4 +95,32 @@ terraform state list
 - `terraform.tfstate` 含**明文敏感信息**，已在 `.gitignore` 中排除，**绝不可提交**。
 - 目前用的是本地 state。多人协作或接入 CI 前，必须迁移到 S3 backend +
   DynamoDB 状态锁，否则两个人同时 apply 会写坏 state。
-- 密钥一律走 Secrets Manager，`.tf` 文件里只出现 ARN，不出现明文。
+- 密钥一律走 **SSM Parameter Store**（SecureString + AWS 托管密钥 `alias/aws/ssm`），
+  `.tf` 文件里只出现 ARN，不出现明文。选 SSM 而不是 Secrets Manager 的原因是成本：
+  标准 SSM 参数免费，Secrets Manager 每个密钥 $0.40/月且服务停机也照收。
+
+## 部署前置：先建好这四个参数
+
+`terraform plan` 会在 data source 阶段就检查它们是否存在，缺一个就报错。
+
+```bash
+for kv in   "legal-rag-v1/pg-password:<PG 密码>"   "legal-rag-v1/embed-api-key:<SiliconFlow key>"   "legal-rag-v1/rerank-api-key:<SiliconFlow key，可与上面相同>"   "legal-rag-v1/generate-model-api:<Z.ai key>"
+do
+  aws ssm put-parameter --name "${kv%%:*}" --value "${kv#*:}"       --type SecureString --overwrite
+done
+```
+
+> 不要加 `--tier Advanced`（$0.05/个/月），也不要指定自建 KMS 密钥（$1/月）——
+> 默认的标准层 + `alias/aws/ssm` 才是免费的。
+
+执行角色 `rag-ecs-execution-role` 需要有 `ssm:GetParameters`（对这四个参数 ARN）
+和 `kms:Decrypt`（对 `alias/aws/ssm`）。这两个角色是账号里手工建的，本目录的
+Terraform 只引用、不管理其策略；权限缺失的表现是任务启动失败并报
+`ResourceInitializationError`。
+
+旧的 Secrets Manager 条目（`legal-rag-v1/pg-password`、`legal-rag-v1/gemini-api-key`）
+迁移后可以删掉止损：
+
+```bash
+aws secretsmanager delete-secret --secret-id legal-rag-v1/gemini-api-key     --force-delete-without-recovery
+```
