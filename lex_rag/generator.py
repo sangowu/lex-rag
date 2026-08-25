@@ -35,19 +35,29 @@ _RESPONSE_SCHEMA = {
 _GENERATE_PROMPT = """\
 You are a legal contract analysis assistant. Answer questions based ONLY on the contract excerpts provided.
 
-IMPORTANT — when to refuse:
-Set "refused": true (and "answer": "") if:
-- The exact information is not present in any of the excerpts
-- You would need to infer or fabricate to answer
-- The question asks whether a specific type of provision exists (non-compete, non-disparagement,
-  termination for convenience, ...) and no excerpt contains such a provision. Absence of a
-  provision is a refusal, NOT an answer of "No" — only answer "No" when an excerpt explicitly
-  states the negative (e.g. "Distributor shall NOT be entitled to ...").
-- A related-but-different clause is present. Quoting a clause that merely resembles the one
-  asked about is a wrong answer, not a partial one.
-When in doubt, refuse.
+Questions come in two kinds. Apply the matching rule.
 
-Only set "refused": false when the answer is explicitly stated in the excerpts.
+KIND A — "does this contract contain a <type of provision>?"
+(non-compete, non-disparagement, termination for convenience, exclusivity, ROFR, ...)
+Set "refused": true (and "answer": "") if:
+- No excerpt contains such a provision. Absence of a provision is a refusal, NOT an answer of
+  "No" — only answer "No" when an excerpt explicitly states the negative
+  (e.g. "Distributor shall NOT be entitled to ...").
+- Only a related-but-different clause is present. Quoting a clause that merely resembles the
+  one asked about is a wrong answer, not a partial one.
+
+KIND B — factual extraction: the contract's name, the parties, dates, term length, renewal
+period, expiration, notice periods, durations, amounts, governing law.
+These are almost always stated somewhere in the contract, so **answer them**:
+- Quote the passage that states the fact, even when it is expressed relatively rather than
+  literally. "The term shall be ten (10) years from the Effective Date" IS the answer to a
+  question about expiration — quoting it is not inference.
+- The title line at the top of a contract IS its document name; the opening paragraph naming
+  the signatories IS the parties.
+- Refuse only when no excerpt addresses the fact at all.
+
+For both kinds: refuse if answering would require fabricating text that is not in the excerpts.
+"When in doubt, refuse" applies to KIND A, not to KIND B.
 
 Respond in JSON with exactly two fields:
 - "refused": true or false
@@ -56,7 +66,7 @@ Respond in JSON with exactly two fields:
 When "refused" is false:
 - Your answer MUST consist only of verbatim quotes from the excerpts, cited with [N]
 - Do NOT paraphrase, summarize, or add any words not present in the excerpts
-- Yes/No questions: start with "Yes" or "No", then immediately quote the exact clause.
+- Yes/No questions (KIND A): start with "Yes" or "No", then immediately quote the exact clause.
   Reminder: if neither the provision nor an explicit negative statement is in the excerpts,
   refuse instead of answering "No"
 - Factual questions: quote the exact sentence(s) that contain the answer
@@ -70,6 +80,10 @@ Q: Does this contract allow termination for convenience?
    (excerpts only contain: "Either party may terminate this Agreement upon 30 days prior written
    notice upon the occurrence of any event of default")
 A: {{"refused": true, "answer": ""}}
+
+Q: On what date will this contract expire?
+   (excerpts contain: "The term of this Agreement shall be ten (10) years from the Effective Date")
+A: {{"refused": false, "answer": "\"The term of this Agreement shall be ten (10) years from the Effective Date\" [1]."}}
 
 Q: What is the governing law of this contract?
 A: {{"refused": false, "answer": "Illinois. \\"This Agreement is to be construed according to the laws of the State of Illinois\\" [1]."}}
