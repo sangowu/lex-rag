@@ -80,6 +80,20 @@ class ChatClient:
             thinking=getattr(cfg, "thinking", None),
         )
 
+    def _backoff_sec(self, error: Exception, attempt: int) -> float:
+        """限流类错误退避得更狠：普通错误 2^n，429 用 4^n（上限 60s）。
+
+        Z.ai 的 429 有两种：1302 配额限流、1305 服务过载。两者都是"等一会儿就好"，
+        但 2/4/8 秒这种退避对 1305 明显不够——实测评测跑到 judge 阶段仍被打断。
+        """
+        msg = str(error)
+        is_rate_limited = (
+            type(error).__name__ == "RateLimitError" or "429" in msg or "rate limit" in msg.lower()
+        )
+        if is_rate_limited:
+            return min(self.retry_backoff_sec * (4 ** attempt), 60.0)
+        return self.retry_backoff_sec * (2 ** attempt)
+
     def _extra_body(self) -> dict:
         """Z.ai 的 thinking 开关。GLM-4.5+ 默认 enabled，实测同一个问题
         开着要 376 个输出 token（其中 1366 字符是 reasoning_content），
@@ -126,7 +140,7 @@ class ChatClient:
             except Exception as e:
                 last_error = e
                 if attempt < self.max_retries:
-                    time.sleep(self.retry_backoff_sec * (2 ** attempt))
+                    time.sleep(self._backoff_sec(e, attempt))
         tracing.end_generation(gen, output="<error>")
         raise LLMError(f"{self.model} 调用重试 {self.max_retries} 次后仍失败：{last_error}") from last_error
 

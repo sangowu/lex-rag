@@ -143,3 +143,22 @@ def test_thinking_field_is_omitted_by_default_and_sent_when_set():
 def test_from_config_picks_up_thinking():
     assert ChatClient.from_config(_cfg()).thinking is None
     assert ChatClient.from_config(_cfg(thinking=False)).thinking is False
+
+
+def test_rate_limit_errors_back_off_harder_than_generic_errors():
+    """429 是"等一会儿就好"，2/4/8 秒退避实测不够——限流走 4^n，上限 60s。"""
+    c = _client()
+    c.retry_backoff_sec = 2.0      # _client() 默认 0，会让两种退避都算成 0
+
+    class RateLimitError(Exception):
+        pass
+
+    generic = RuntimeError("connection reset")
+    limited = RateLimitError("Error code: 429 - service overloaded")
+
+    # 第一次重试两者相同（base * x^0），从第二次起限流才拉开差距
+    assert c._backoff_sec(generic, 0) == c._backoff_sec(limited, 0) == 2.0
+    assert c._backoff_sec(generic, 1) == 4.0
+    assert c._backoff_sec(limited, 1) == 8.0
+    assert c._backoff_sec(limited, 2) > c._backoff_sec(generic, 2)
+    assert c._backoff_sec(limited, 10) == 60.0        # 封顶，不会退避到天荒地老
