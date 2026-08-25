@@ -21,15 +21,25 @@ data "aws_iam_role" "ecs_task" {
   name = "rag-ecs-task-role"
 }
 
-# 已经存在的 Secrets Manager 条目。
-# 注意：这里只拿到 ARN，Terraform 完全不会读取密文，
-# 密文由 ECS agent 在启动容器时自己去取。
-data "aws_secretsmanager_secret" "pg_password" {
-  name = "${var.service_name}/pg-password"
+# 运行时密钥存在 SSM Parameter Store（SecureString + AWS 托管密钥 alias/aws/ssm）。
+#
+# 为什么不用 Secrets Manager：标准 SSM 参数免费，Secrets Manager 每个密钥
+# $0.40/月，服务停机也照收。ECS 的 secrets.valueFrom 对两者都是原生支持，
+# 容器侧完全无感。
+#
+# with_decryption = false 是刻意的：这里只需要 ARN，关掉解密可以避免把明文
+# 拉进 terraform state。用 data 而不是拼字符串，是为了在 plan 阶段就能发现
+# 参数不存在，而不是等容器启动失败才知道。
+data "aws_ssm_parameter" "runtime" {
+  for_each        = local.runtime_secrets
+  name            = each.value
+  with_decryption = false
 }
 
-data "aws_secretsmanager_secret" "gemini_api_key" {
-  name = "${var.service_name}/gemini-api-key"
+# SecureString 用的 AWS 托管密钥。取别名而不是硬编码 key id：
+# 换账号/换区域时别名不变，key id 会变。
+data "aws_kms_alias" "ssm" {
+  name = "alias/aws/ssm"
 }
 
 # ---------------------------------------------------------------------------
@@ -37,6 +47,20 @@ data "aws_secretsmanager_secret" "gemini_api_key" {
 # ---------------------------------------------------------------------------
 
 locals {
+  # 容器运行时需要的密钥：环境变量名 => SSM 参数名。
+  # 需要先在 AWS 里建好这些 SecureString 参数，terraform plan 才能通过。
+  #
+  # 不含 MINERU_API_TOKEN：OCR 是独立的离线脚本，不在 serve.py 的服务路径里。
+  # 将来若要在容器内跑 ingest_ocr，把它加进这张表即可。
+  # 名字带前导斜杠，与账号里既有的 /proshot/* 命名习惯一致。
+  # SSM 的 GetParameter 按名字精确匹配，少一个斜杠就是 ParameterNotFound。
+  runtime_secrets = {
+    PG_PASSWORD        = "/${var.service_name}/pg-password"
+    EMBED_API_KEY      = "/${var.service_name}/embed-api-key"
+    RERANK_API_KEY     = "/${var.service_name}/rerank-api-key"
+    GENERATE_MODEL_API = "/${var.service_name}/generate-model-api"
+  }
+
   # 拼出完整的 ECR 镜像地址，替代原来硬编码的
   # 569260897196.dkr.ecr.eu-west-1.amazonaws.com/legal-rag-v1:latest
   image_uri = format(
@@ -105,22 +129,21 @@ resource "aws_ecs_task_definition" "app" {
         }
       ]
 
-      # 非敏感的普通环境变量
-      environment = [
-        { name = "EMBED_API_KEY", value = "" },
-      ]
+      # 非敏感的普通环境变量。
+      # EMBED_API_KEY 原先在这里、值是空串 —— 容器起来后所有 embedding 调用
+      # 都会 401，且报错指向 SiliconFlow 而不是配置本身。已挪进 secrets。
+      environment = []
 
-      # 敏感值：只传 ARN，明文永远不进 Terraform，也不进任务定义。
-      # ECS agent 启动容器前会自己去 Secrets Manager 取，注入成环境变量。
+      # 敏感值：只传 ARN，明文不进 Terraform，也不进任务定义。
+      # ECS agent 启动容器前自己去 SSM 取，注入成环境变量。
+      #
+      # 前提：执行角色需要有 ssm:GetParameters 与 kms:Decrypt ——
+      # 由本文件末尾的 aws_iam_role_policy.ecs_execution_ssm 提供。
       secrets = [
-        {
-          name      = "PG_PASSWORD"
-          valueFrom = data.aws_secretsmanager_secret.pg_password.arn
-        },
-        {
-          name      = "GEMINI_API_KEY"
-          valueFrom = data.aws_secretsmanager_secret.gemini_api_key.arn
-        },
+        for env_name, param_name in local.runtime_secrets : {
+          name      = env_name
+          valueFrom = data.aws_ssm_parameter.runtime[env_name].arn
+        }
       ]
 
       logConfiguration = {
@@ -136,4 +159,48 @@ resource "aws_ecs_task_definition" "app" {
       }
     }
   ])
+}
+
+# ---------------------------------------------------------------------------
+# 执行角色读取 SSM 密钥的权限
+#
+# 角色本身是账号里手工建的，上面用 data 引用、不归 Terraform 管（destroy 不会
+# 删掉它）。但这条内联策略是本服务专属的，交给 Terraform 管理更合适：权限变更
+# 有 diff 可看，也不会散落在某次手敲的 CLI 里。
+#
+# 权限缺失时的表现是任务启动失败并报 ResourceInitializationError，
+# 而不是容器起来后报错，容易误判成镜像问题。
+#
+# 两条都按最小权限收敛：参数只授权这四个具体 ARN（不用通配符）；kms:Decrypt
+# 加 ViaService 条件，使这把密钥只能经由 SSM 使用，拿不到手也用不到别处。
+# ---------------------------------------------------------------------------
+
+resource "aws_iam_role_policy" "ecs_execution_ssm" {
+  name = "${var.service_name}-ssm-read"
+  role = data.aws_iam_role.ecs_execution.name
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "ReadRuntimeSecrets"
+        Effect = "Allow"
+        # ECS agent 实际调用的是复数形式的 GetParameters；GetParameter 一并给上，
+        # 方便本地用 CLI 排查同一组参数。
+        Action   = ["ssm:GetParameters", "ssm:GetParameter"]
+        Resource = [for k in keys(local.runtime_secrets) : data.aws_ssm_parameter.runtime[k].arn]
+      },
+      {
+        Sid      = "DecryptWithSsmManagedKey"
+        Effect   = "Allow"
+        Action   = ["kms:Decrypt"]
+        Resource = [data.aws_kms_alias.ssm.target_key_arn]
+        Condition = {
+          StringEquals = {
+            "kms:ViaService" = "ssm.${data.aws_region.current.region}.amazonaws.com"
+          }
+        }
+      },
+    ]
+  })
 }

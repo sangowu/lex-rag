@@ -14,12 +14,12 @@
       "portMappings": [
         {"containerPort": 6800, "protocol": "tcp"}
       ],
-      "environment": [
-        {"name": "EMBED_API_KEY", "value": ""}
-      ],
+      "environment": [],
       "secrets": [
-        {"name": "PG_PASSWORD", "valueFrom": "arn:aws:secretsmanager:eu-west-1:569260897196:secret:legal-rag-v1/pg-password-UbCiTD"},
-        {"name": "GEMINI_API_KEY", "valueFrom": "arn:aws:secretsmanager:eu-west-1:569260897196:secret:legal-rag-v1/gemini-api-key-d9dqXJ"}
+        {"name": "PG_PASSWORD", "valueFrom": "arn:aws:ssm:eu-west-1:569260897196:parameter/legal-rag-v1/pg-password"},
+        {"name": "EMBED_API_KEY", "valueFrom": "arn:aws:ssm:eu-west-1:569260897196:parameter/legal-rag-v1/embed-api-key"},
+        {"name": "RERANK_API_KEY", "valueFrom": "arn:aws:ssm:eu-west-1:569260897196:parameter/legal-rag-v1/rerank-api-key"},
+        {"name": "GENERATE_MODEL_API", "valueFrom": "arn:aws:ssm:eu-west-1:569260897196:parameter/legal-rag-v1/generate-model-api"}
       ],
       "logConfiguration": {
         "logDriver": "awslogs",
