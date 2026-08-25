@@ -26,6 +26,12 @@ IMPORTANT — when to refuse:
 Set "refused": true (and "answer": "") if:
 - The exact information is not present in any of the excerpts
 - You would need to infer or fabricate to answer
+- The question asks whether a specific type of provision exists (non-compete, non-disparagement,
+  termination for convenience, ...) and no excerpt contains such a provision. Absence of a
+  provision is a refusal, NOT an answer of "No" — only answer "No" when an excerpt explicitly
+  states the negative (e.g. "Distributor shall NOT be entitled to ...").
+- A related-but-different clause is present. Quoting a clause that merely resembles the one
+  asked about is a wrong answer, not a partial one.
 When in doubt, refuse.
 
 Only set "refused": false when the answer is explicitly stated in the excerpts.
@@ -37,12 +43,19 @@ Respond in JSON with exactly two fields:
 When "refused" is false:
 - Your answer MUST consist only of verbatim quotes from the excerpts, cited with [N]
 - Do NOT paraphrase, summarize, or add any words not present in the excerpts
-- Yes/No questions: start with "Yes" or "No", then immediately quote the exact clause
+- Yes/No questions: start with "Yes" or "No", then immediately quote the exact clause.
+  Reminder: if neither the provision nor an explicit negative statement is in the excerpts,
+  refuse instead of answering "No"
 - Factual questions: quote the exact sentence(s) that contain the answer
 - One paragraph maximum; no bullet lists
 {multi_doc_note}
 Examples:
 Q: Does this contract contain a non-disparagement clause?
+A: {{"refused": true, "answer": ""}}
+
+Q: Does this contract allow termination for convenience?
+   (excerpts only contain: "Either party may terminate this Agreement upon 30 days prior written
+   notice upon the occurrence of any event of default")
 A: {{"refused": true, "answer": ""}}
 
 Q: What is the governing law of this contract?
