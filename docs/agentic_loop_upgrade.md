@@ -112,7 +112,8 @@ class RetrievalStrategy:
 
 ### 2.3 `sufficiency_judge`（约 1 天）
 
-用 Gemini 的 `tool_choice` 强制结构化输出（不要正则解析 JSON）：
+复用现有 LLM client（当前为 **glm-4.7-flash**，见 `lex_rag/config.py`）的
+function calling / 强制结构化输出，**不要正则解析 JSON**：
 
 ```python
 {
