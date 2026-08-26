@@ -54,7 +54,12 @@ class RerankClient:
         for i in range(0, len(texts), batch_size):
             scores.extend(self._score_batch(query, texts[i:i + batch_size]))
         ranked = sorted(zip(chunks, scores), key=lambda x: x[1], reverse=True)
-        return [c for c, _ in ranked[:top_k]]
+        out = []
+        for chunk, score in ranked[:top_k]:
+            # 覆盖检索阶段的分数：这里返回的是重排后的名次，分数必须同源。
+            chunk.score, chunk.score_kind = float(score), "rerank"
+            out.append(chunk)
+        return out
 
     def _score_batch(self, query: str, texts: list[str]) -> list[float]:
         """调用 rerank 接口，返回与输入 texts 顺序一致的分数列表。"""

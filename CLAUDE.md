@@ -149,6 +149,26 @@ question → embeddings.py → store.py（vector / bm25 / hybrid RRF）
 - **`llm.py`** — `ChatClient`，所有 LLM 调用的唯一入口（OpenAI 兼容 `/chat/completions`）。换服务商只改 `config.yaml` 的 `contextual.base_url` / `contextual.model`，调用方不动
 - **`contextualizer.py`** — 五个类都用 `ChatClient.from_config(cfg, max_retries=0)`：各类自带重试循环，不覆盖会变成 (n+1)² 次请求；结果缓存在 `.cache/contextual.json`，key = `chunk_id:text_hash`
 
+### 检索分数
+
+`ChunkWindow.score` / `score_kind` 在检索期填充，ingest 期恒为 None。**一律"越大越相关"**
+（余弦距离在 store 里已转成相似度），但**数值跨阶段不可比**，所以 `score_kind` 必须跟着
+分数一起落盘：
+
+| score_kind | 来源 | 典型量级 |
+|-----------|------|---------|
+| `cosine_sim` | `store.search_vector`，1 − 余弦距离 | 0.5 ~ 0.7 |
+| `bm25` | `store.search_bm25`，`ts_rank_cd` | 0.8 ~ 1.5 |
+| `rrf` | `store.search_hybrid` / `pipeline._rrf_merge` | 0.01 ~ 0.05 |
+| `rerank` | `reranker.rerank` | 0 ~ 1 |
+
+后一阶段会覆盖前一阶段的分数：返回的是哪个阶段的排名，分数就是哪个阶段的，否则 trace 里
+的分数与它自己的名次对不上。`expand_to_parent` 的 parent 继承命中它的 child 里最高的分数。
+
+> ⚠️ 改检索 SQL 或排序逻辑后，**先对拍返回的 chunk_id 顺序，再考虑跑评测**：
+> 200 条对拍 2 分钟且能定位到"哪一条第几位"，跑全量要 27 分钟且只能给出聚合差值。
+> 见 `docs/refactor_regression.md`。
+
 ### PostgreSQL 表结构
 
 - **`chunks` / `chunks_contextual`**（或任意自定义表名）：`chunk_id PK, doc_id, text, start_pos, end_pos, embedding vector(1024), tsv tsvector GENERATED`
@@ -216,6 +236,11 @@ eval_ocr.py（本地，按 --batch-size 成批）
 - **`contextualizer.py`** — `MetadataExtractor` 提取合同元数据（contract_type/party_a/party_b/effective_date/governing_law/key_clauses），缓存于 `.cache/meta_extract.json`
 - **`store.py`** — `doc_meta` 表存储结构化元数据，`get_doc_meta(doc_id)` 供查询时注入
 - **`pipeline.py`** — 新增 `get_doc_meta(doc_id)` 方法
+- **`trace_sink.py`** — 本地 JSONL 实验语料落盘（规格 2.5），**与 `tracing.py` 职责不同**：
+  后者是 Langfuse 封装、没配 key 就完全 no-op（在线可观测性）；前者给了路径就一定写，
+  写不出来往 stderr 响一次但不抛（实验语料）。一次查询一行，写完立刻 `flush` + `fsync`
+  ——此前两轮评测在收尾阶段崩掉、200 条结果全丢，逐行落盘是针对那个教训的。
+  路径以 `.gz` 结尾自动压缩。读回用 `read_traces()` / `read_meta()`
 - **`sufficiency.py`** — `SufficiencyJudge`，判断"当前 chunks 够不够回答"，输出
   `sufficient / missing / missing_kind / out_of_scope / confidence`。
   `missing_kind` 是**枚举**（exact_term / clause_context / concept_mismatch /

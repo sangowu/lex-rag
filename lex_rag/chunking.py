@@ -11,6 +11,12 @@ class ChunkWindow:
     start: int       # 在原文中的起始字符位置
     end: int         # 在原文中的结束字符位置
     parent_chunk_id: str | None = None  # parent-child 模式：child 指向 parent，parent 为 None
+    # 检索期填充，ingest 期恒为 None。**一律"越大越相关"**——余弦距离在 store 里
+    # 已转成相似度，免得下游还要按 kind 判断比较方向。
+    score: float | None = None
+    # 分数的语义随产生它的阶段而变（cosine_sim / bm25 / rrf / rerank），
+    # 数值跨阶段不可比，所以必须跟着分数一起落盘，否则 trace 里的数字无法解释。
+    score_kind: str | None = None
 
 def chunk_fixed(
     doc_id: str,

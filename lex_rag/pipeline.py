@@ -19,7 +19,12 @@ def _rrf_merge(result_lists: list[list[ChunkWindow]], k: int = 60) -> list[Chunk
             if cid not in chunks:
                 chunks[cid] = chunk
     sorted_ids = sorted(scores, key=scores.__getitem__, reverse=True)
-    return [chunks[cid] for cid in sorted_ids]
+    out = []
+    for cid in sorted_ids:
+        chunk = chunks[cid]
+        chunk.score, chunk.score_kind = scores[cid], "rrf"
+        out.append(chunk)
+    return out
 
 
 class RAGPipeline:
