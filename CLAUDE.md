@@ -148,6 +148,16 @@ question → embeddings.py → store.py（vector / bm25 / hybrid RRF）
 - **`config.py`** — 所有 dataclass 配置，`load_config()` 从 config.yaml + .env 加载；各脚本用 `dataclasses.replace()` 在运行时覆盖字段，不改文件
 - **`llm.py`** — `ChatClient`，所有 LLM 调用的唯一入口（OpenAI 兼容 `/chat/completions`）。换服务商只改 `config.yaml` 的 `contextual.base_url` / `contextual.model`，调用方不动
 - **`contextualizer.py`** — 五个类都用 `ChatClient.from_config(cfg, max_retries=0)`：各类自带重试循环，不覆盖会变成 (n+1)² 次请求；结果缓存在 `.cache/contextual.json`，key = `chunk_id:text_hash`
+  ⚠️ **降级结果绝不写缓存**（HyDE / MetadataExtractor / QueryExpander 三处）。
+  写了就把一次瞬时故障固化成永久行为，而且完全静默：`.cache/hyde.json` 曾 41 条全部
+  等于原问题，HyDE 因此长期是空操作，唯一症状是 `hybrid vs hyde` 检索重合度精确等于
+  1.000。判据必须是"这次有没有降级"，不能是"结果是否等于输入"——模型合法的短回答会
+  被后者误判。见 `docs/experiments.md`
+- **`agent.py`** — `AgenticPipeline`，规格 2.4 的多轮循环：选策略 → 检索 → 累积 →
+  `SufficiencyJudge` 判定够不够。继续条件是"不充分"而非旧版的"结果为空"（hybrid 几乎
+  永不返回空，旧循环是死代码）。`StrategySelector` 是 LLM 决策，失败/重复时回落到
+  `missing_kind` 映射表。**防重复在执行层拦截**，不靠 prompt。传 `sink=TraceSink(...)`
+  即逐轮落盘。`query()` / `query_stream()` 的签名保持不变，`serve.py` 与 `eval.py` 不用改
 
 ### 检索分数
 
@@ -252,6 +262,13 @@ eval_ocr.py（本地，按 --batch-size 成批）
   实验保留，不要接进生产路径
 
 ### 当前最优配置
+
+> ⚠️ **按 `doc_id` 检索时策略选择没有发挥空间。** CUAD 的 25 份合同中位只有 23 个
+> chunk，17/25 的 chunk 总数 ≤ `fetch_k=60`——候选池就是整份合同，换策略不改变
+> reranker 的输入。实测 hybrid / vector / hyde 三者返回 top-10 的重合度 0.97~0.99，
+> 五个动作实际塌缩成两个（hybrid 系 与 bm25）；corpus scope 下才拉得开
+> （bm25 vs vector 降到 0.333）。**规格 2.6 的三组对照应以 corpus scope 为主**，
+> 否则测的是一个没有决策空间的决策层。见 `docs/experiments.md`。
 
 **检索层**（律所/法务场景，hit@1 和 mrr@5 为核心指标）。
 Run: `20260824T230237Z`，1000 条 CUAD QA：

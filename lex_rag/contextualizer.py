@@ -310,6 +310,7 @@ class MetadataExtractor:
         prompt = _META_PROMPT.format(doc_preview=preview)
 
         meta = self._empty_meta()
+        degraded = True          # 只有成功解析出 JSON 才翻成 False
         for attempt in range(self.cfg.max_retries + 1):
             try:
                 raw = self._chat.complete(prompt, trace_name="meta.extract")
@@ -319,6 +320,7 @@ class MetadataExtractor:
                     lines = raw.split("\n")
                     raw = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
                 meta = json.loads(raw)
+                degraded = False
                 break
             except json.JSONDecodeError:
                 meta = self._empty_meta()
@@ -329,8 +331,11 @@ class MetadataExtractor:
                 else:
                     meta = self._empty_meta()
 
-        self._cache[key] = meta
-        self._save_cache()
+        # 同 HyDE：空 meta 是降级结果，缓存了会让生成层从此永远拿不到元数据前缀，
+        # 而且完全静默——没有任何报错，只是答案里少了合同类型和当事方。
+        if not degraded:
+            self._cache[key] = meta
+            self._save_cache()
         return meta
 
 
@@ -386,6 +391,7 @@ class HyDEClient:
             time.sleep(self._min_interval - elapsed)
 
         prompt = _HYDE_PROMPT.format(question=question)
+        degraded = False
         for attempt in range(self.cfg.max_retries + 1):
             try:
                 hypo = self._chat.complete(prompt, trace_name="hyde.generate")
@@ -397,9 +403,16 @@ class HyDEClient:
                 else:
                     # 降级：直接返回原始问题，不影响检索流程
                     hypo = question
+                    degraded = True
 
-        self._cache[key] = hypo
-        self._save_cache()
+        # **降级结果绝不写缓存。** 写了就把一次瞬时故障固化成永久行为——实测
+        # .cache/hyde.json 里 41 条全部等于原问题，HyDE 因此长期是空操作，而缓存
+        # 命中让它永远不会重试（`hybrid vs hyde` 的结果重合度精确等于 1.000）。
+        # 判据只能是"这次有没有降级"，不能是"结果是否等于输入"——模型偶尔确实
+        # 会回一句和问题很像的话，那是合法输出。
+        if not degraded:
+            self._cache[key] = hypo
+            self._save_cache()
         return hypo
 
 
@@ -463,6 +476,7 @@ class QueryExpander:
 
         prompt = _EXPAND_PROMPT.format(n=self.n - 1, question=question)
         variants = [question]
+        degraded = True          # 拿到合法的变体列表才翻成 False
         for attempt in range(self.cfg.max_retries + 1):
             try:
                 raw = self._chat.complete(prompt, trace_name="multiquery.expand")
@@ -473,6 +487,7 @@ class QueryExpander:
                 parsed = json.loads(raw)
                 if isinstance(parsed, list):
                     variants = [question] + [str(v) for v in parsed]
+                    degraded = False
                 break
             except json.JSONDecodeError:
                 break
@@ -480,6 +495,8 @@ class QueryExpander:
                 if attempt < self.cfg.max_retries:
                     time.sleep(self.cfg.retry_backoff_sec * (2 ** attempt))
 
-        self._cache[key] = variants
-        self._save_cache()
+        # 同 HyDE：只剩原问题是降级结果，缓存了就等于永久关闭 multi-query。
+        if not degraded:
+            self._cache[key] = variants
+            self._save_cache()
         return variants

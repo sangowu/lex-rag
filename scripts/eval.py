@@ -113,6 +113,12 @@ def run_agentic_eval(pipeline, qa_items, cfg, contextual_cfg) -> dict:
     两遍扫描评估 Agentic 检索的恢复能力。
     Pass 1：标准检索，找出 chunks==[] 的 failed_set。
     Pass 2：仅对 failed_set 运行 AgenticPipeline，统计恢复率。
+
+    ⚠️ **这个评估的前提已经过时。** 它挑的是"检索返回空列表"的样本，而 hybrid
+    检索几乎永远返回非空结果——这正是 `lex_rag/agent.py` 重写前那个死循环的成因。
+    新的 agentic 循环解决的是"检索到了但不对/不全"，不是"没检索到"，所以本函数
+    大概率会报告"无需恢复"。真正的评估是规格 2.6 的三组配置 × 全量 trace 语料。
+    保留它只是为了不破坏 `--agentic` 这个既有入口。
     """
     from lex_rag.agent import AgenticPipeline
 
@@ -159,17 +165,21 @@ def run_agentic_eval(pipeline, qa_items, cfg, contextual_cfg) -> dict:
         chunks, query_trace = agent.query(item.question, doc_id=doc_id, k=max_k)
         elapsed = (time.perf_counter() - t0) * 1000
 
-        iter_counts.append(len(query_trace))
+        # query_trace 的形状：[原始问题, 每轮一行..., terminated_by=...]
+        # 所以轮数是总长减去首尾两行，不能直接用 len()。
+        n_rounds = max(len(query_trace) - 2, 1)
+        iter_counts.append(n_rounds)
         hit = bool(chunks and _hit(chunks, item.spans, max_k))
         if hit:
             n_recovered += 1
 
-        if len(query_trace) > 1:
+        if n_rounds > 1:
             rewrite_latencies.append(elapsed)
             rewrite_log.append({
                 "doc_id":       item.doc_id,
                 "original":     query_trace[0],
-                "rewrites":     query_trace[1:],
+                "rounds":       query_trace[1:-1],
+                "terminated_by": query_trace[-1],
                 "recovered":    hit,
                 "latency_ms":   round(elapsed, 1),
             })
