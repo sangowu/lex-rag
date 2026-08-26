@@ -118,6 +118,10 @@ class GenerationResult:
     is_refused: bool = False             # True = 模型判断合同中无相关信息
     latency_ms: float = 0.0
     error: str | None = None             # 非 None 表示调用失败
+    # 以下三个仅两段式（VerifiedGenerator）会填，单段路径保持默认值。
+    verdict: dict | None = None          # 校验环节的 Verdict.to_dict()
+    llm_calls: int = 1                   # 本次回答一共打了几次 LLM
+    flipped: str | None = None           # None | "to_refusal" | "escalated"
 
 
 class LegalGenerator:
@@ -360,4 +364,82 @@ class LegalGenerator:
             citations=citations,
             is_refused=is_refused,
             latency_ms=latency_ms,
+        )
+
+
+class VerifiedGenerator:
+    """两段式生成：先快速作答，再由 sufficiency judge 校验。
+
+    ⚠️ **这个类输掉了 A/B，不在生产路径上。** 保留它是为了让
+    `scripts/ab_sufficiency.py` 那次实验还能复跑；要改生成层请改 `LegalGenerator`。
+
+    原本的动机是延迟：单段配置靠 `thinking=true` 撑住拒答门，代价是每次问答都要
+    数秒，而 thinking 的价值只体现在"这份合同到底有没有这个条款"的判断上。两段式
+    想把这个判断挪到独立的校验环节，主生成走 `thinking=false` 的快速路径，校验则
+    双向纠正——引用不成立或条款不存在的翻成拒答，被误拒但上下文其实够的升级重跑。
+
+    200 条实测（`docs/experiments.md`）的结果是负收益：**校验只干预了 3 次，
+    3 次全错**，比不加校验的单段快速路径每个指标都差，成本还翻倍。原因不是判定器
+    判错得多，而是它的判断与草稿高度一致——同模型、同上下文，第二段并不掌握第一段
+    没有的信息，于是既救不回误拒，也拦不住编造。两段式要成立，第二段必须换一个
+    信息源（不同模型、或补充检索），而不只是多看一眼草稿。
+
+    翻转规则刻意不带置信度阈值：先测朴素规则，加了旋钮就得调旋钮，而调旋钮需要的
+    样本量比这次 A/B 大得多。事后看这个选择是对的——判定器的 confidence 在两个
+    分支上重叠到几乎完全一致（0.95~1.00 vs 0.80~1.00），阈值本来也无处可设。
+    """
+
+    def __init__(self, cfg: ContextualConfig, *,
+                 judge_cfg: ContextualConfig | None = None,
+                 escalate: bool = True) -> None:
+        from dataclasses import replace as _replace
+
+        from lex_rag.sufficiency import SufficiencyJudge
+
+        self.cfg = cfg
+        self.escalate = escalate
+        self._fast = LegalGenerator(_replace(cfg, thinking=False))
+        # 升级路径要的正是 thinking，所以这里显式打开，不看传入配置。
+        self._slow = LegalGenerator(_replace(cfg, thinking=True))
+        # judge 默认也不开 thinking——否则省下来的延迟又还回去了。
+        self._judge = SufficiencyJudge(judge_cfg or _replace(cfg, thinking=False),
+                                       mode="unified")
+
+    def generate(self, question: str, chunks: list[ChunkWindow],
+                 meta: dict | None = None,
+                 metas: dict[str, dict] | None = None) -> GenerationResult:
+        t0 = time.perf_counter()
+        draft = self._fast.generate(question, chunks, meta=meta, metas=metas)
+        if draft.error or not chunks:
+            return draft
+
+        verdict = self._judge.judge(
+            question, chunks,
+            draft_answer="" if draft.is_refused else draft.answer,
+        )
+        calls = 2
+
+        if not draft.is_refused:
+            if verdict.answer_supported is False or verdict.out_of_scope:
+                return GenerationResult(
+                    question=question, answer="", is_refused=True,
+                    latency_ms=(time.perf_counter() - t0) * 1000,
+                    verdict=verdict.to_dict(), llm_calls=calls, flipped="to_refusal",
+                )
+        elif self.escalate and verdict.sufficient and not verdict.out_of_scope:
+            retry = self._slow.generate(question, chunks, meta=meta, metas=metas)
+            calls = 3
+            if not retry.error:
+                return GenerationResult(
+                    question=question, answer=retry.answer, citations=retry.citations,
+                    is_refused=retry.is_refused,
+                    latency_ms=(time.perf_counter() - t0) * 1000,
+                    verdict=verdict.to_dict(), llm_calls=calls, flipped="escalated",
+                )
+
+        return GenerationResult(
+            question=question, answer=draft.answer, citations=draft.citations,
+            is_refused=draft.is_refused,
+            latency_ms=(time.perf_counter() - t0) * 1000,
+            verdict=verdict.to_dict(), llm_calls=calls,
         )
