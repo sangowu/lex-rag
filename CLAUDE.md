@@ -27,6 +27,10 @@ uv run scripts/eval.py --compare data/runs/eval/A.json data/runs/eval/B.json
 # Grid search（结果写入 data/runs/grid/<ts>/）
 uv run scripts/grid_search.py --reranker
 
+# sufficiency judge 的 A/B（判定器 vs 判定器+两段式生成，结果写入 data/runs/ab_judge/）
+uv run scripts/ab_sufficiency.py --limit 200 --concurrency 4
+uv run scripts/ab_sufficiency.py --compare data/runs/ab_judge/<ts>.json
+
 # 生成层评估（结果写入 data/runs/gen_eval/<ts>.json）
 uv run scripts/eval_generation.py --limit 200 --reranker --sim-threshold 0.70
 uv run scripts/eval_generation.py --limit 200 --reranker --sim-threshold 0.70 --ragas --ragas-limit 30
@@ -212,6 +216,15 @@ eval_ocr.py（本地，按 --batch-size 成批）
 - **`contextualizer.py`** — `MetadataExtractor` 提取合同元数据（contract_type/party_a/party_b/effective_date/governing_law/key_clauses），缓存于 `.cache/meta_extract.json`
 - **`store.py`** — `doc_meta` 表存储结构化元数据，`get_doc_meta(doc_id)` 供查询时注入
 - **`pipeline.py`** — 新增 `get_doc_meta(doc_id)` 方法
+- **`sufficiency.py`** — `SufficiencyJudge`，判断"当前 chunks 够不够回答"，输出
+  `sufficient / missing / missing_kind / out_of_scope / confidence`。
+  `missing_kind` 是**枚举**（exact_term / clause_context / concept_mismatch /
+  multi_aspect），经 `STRATEGY_HINT` 映射到下一轮该换的检索策略——读者是代码不是人，
+  自由文本会把决策质量押在措辞上。字段缺失时**一律按"不够"缺省**：判成不够最多白烧
+  一轮，判成够了会拿着残缺上下文直接生成。
+  ⚠️ `confidence` 在两个分支上重叠（0.95~1.00 vs 0.80~1.00），**不要拿它设阈值**；
+  ⚠️ `mode="unified"` 与 `generator.VerifiedGenerator` 是输掉 A/B 的那一臂，只为复跑
+  实验保留，不要接进生产路径
 
 ### 当前最优配置
 
@@ -256,9 +269,17 @@ Run: `20260824T230237Z`，1000 条 CUAD QA：
 > FP / FN / semantic_hit 不依赖 judge，只有这三行的对比成立。
 > 选定 judge 后应冻结不动，否则每换一次就切断一次历史可比性。
 >
-> 剩余差距是延迟（7.8s vs 756ms），全部来自 thinking。关掉可降到 855ms，但判别力 J 从
-> 0.60 掉到 0.40（横评数据）。可行的优化方向是按问题类型分流：KIND B 事实抽取走无
-> thinking 的快速路径，KIND A 条款存在性才开 thinking。
+> 剩余差距是延迟（7.8s vs 756ms），全部来自 thinking。
+>
+> ⚠️ **"关掉 thinking 会让 J 从 0.60 掉到 0.40"这个说法只在 10 条横评上成立。**
+> 2026-08-26 的 200 条实测里，关掉 thinking 的单段路径 J=0.833、开着的 A 臂
+> J=0.820，差异在噪声内（|z|<1），而延迟是 3.4s vs 10.9s。也就是说 thinking 花掉
+> 3 倍延迟买到的质量差异测不出来。要动配置需要一次单变量实验（同模型同 prompt、
+> 只切 thinking、200 条），**尚未做，所以配置未改**。见 `docs/experiments.md`。
+>
+> 曾经的候选优化"两段式分流"（快速生成 + 廉价校验）已被 200 条 A/B 否掉：校验环节
+> 只干预 3 次且全错，成本翻倍而每个指标都变差。原因是第二段与第一段同模型同上下文，
+> 不掌握新信息。
 >
 > 迁移过程中的失败定位（GLM 拒答门塌陷、thinking 的双向效应、json_schema 无效）
 > 见 `docs/experiments.md`。
