@@ -4,6 +4,7 @@ from lex_rag.chunking import chunk_text, chunk_parent_child, ChunkWindow
 from lex_rag.embeddings import EmbeddingClient
 from lex_rag.reranker import RerankClient
 from lex_rag.store import VectorStore
+from lex_rag.strategy import RetrievalStrategy
 from lex_rag import tracing
 
 
@@ -31,38 +32,67 @@ class RAGPipeline:
             refresh_cache=refresh_cache,
         )
         self.store = VectorStore(cfg.database.dsn, table=cfg.database.table)
-        self.reranker = RerankClient(cfg.reranker) if cfg.reranker.enabled else None
 
-        # contextualizer：根据 contextual_mode 选择实现
-        self.contextualizer = None
-        if cfg.contextual.enabled:
-            if cfg.contextual_mode == "hierarchical":
-                from lex_rag.contextualizer import HierarchicalContextualizer
-                self.contextualizer = HierarchicalContextualizer(cfg.contextual)
-            else:
-                from lex_rag.contextualizer import ContextualClient
-                self.contextualizer = ContextualClient(cfg.contextual)
-
-        # meta extractor（懒初始化，ingest 时按需创建）
+        # 下面四个客户端全部懒加载。
+        #
+        # 改造前它们是 `X if cfg.x_enabled else None`：构造时就按配置决定有没有，
+        # 运行时想用也用不了。现在改成"用到才建"，让每一轮检索都能自己决定要不要
+        # 走 HyDE / multi-query / rerank —— config 只提供默认策略，不再是开关。
+        # 副作用是不用的客户端连构造都省了（各自会 new 一个 ChatClient）。
+        self._reranker: RerankClient | None = None
+        self._contextualizer = None
         self._meta_extractor = None
-        if cfg.extract_meta:
-            from lex_rag.contextualizer import MetadataExtractor
-            self._meta_extractor = MetadataExtractor(cfg.contextual)
-
-        # HyDE client（查询阶段使用，不影响 ingest；复用 contextual 的 Gemini 配置）
         self._hyde = None
-        if cfg.hyde_enabled:
-            from lex_rag.contextualizer import HyDEClient
-            self._hyde = HyDEClient(cfg.contextual)
-
-        # Multi-Query expander（复用 contextual 的 Gemini 配置）
         self._expander = None
-        if cfg.multi_query_enabled:
-            from lex_rag.contextualizer import QueryExpander
-            self._expander = QueryExpander(cfg.contextual, n=cfg.multi_query_n)
 
         # 缓存 chunk_mode，避免每次 query 都访问 DB
         self._chunk_mode_cache: str | None = None
+
+    # ── 懒加载客户端 ────────────────────────────────────────────
+    #
+    # 保留 `pipeline.reranker` / `pipeline.contextualizer` 这两个属性名：
+    # ingest 路径和外部调用方都在用，改名会波及一片而收益为零。
+
+    @property
+    def reranker(self) -> RerankClient | None:
+        """config 里 enabled=False 时仍可用——策略层可以按轮次决定要不要 rerank。"""
+        if self._reranker is None:
+            self._reranker = RerankClient(self.cfg.reranker)
+        return self._reranker
+
+    @property
+    def contextualizer(self):
+        """ingest 阶段用。这里仍然尊重 cfg.contextual.enabled：
+        它控制的是"要不要给 chunk 加前缀"这个 ingest 决策，不是检索策略。"""
+        if self._contextualizer is None and self.cfg.contextual.enabled:
+            if self.cfg.contextual_mode == "hierarchical":
+                from lex_rag.contextualizer import HierarchicalContextualizer
+                self._contextualizer = HierarchicalContextualizer(self.cfg.contextual)
+            else:
+                from lex_rag.contextualizer import ContextualClient
+                self._contextualizer = ContextualClient(self.cfg.contextual)
+        return self._contextualizer
+
+    @property
+    def meta_extractor(self):
+        if self._meta_extractor is None and self.cfg.extract_meta:
+            from lex_rag.contextualizer import MetadataExtractor
+            self._meta_extractor = MetadataExtractor(self.cfg.contextual)
+        return self._meta_extractor
+
+    @property
+    def hyde(self):
+        if self._hyde is None:
+            from lex_rag.contextualizer import HyDEClient
+            self._hyde = HyDEClient(self.cfg.contextual)
+        return self._hyde
+
+    def expander(self, n: int):
+        """QueryExpander 的变体数是构造参数，所以按 n 缓存。"""
+        if self._expander is None or getattr(self._expander, "n", None) != n:
+            from lex_rag.contextualizer import QueryExpander
+            self._expander = QueryExpander(self.cfg.contextual, n=n)
+        return self._expander
 
     def _get_chunk_mode(self) -> str:
         if self._chunk_mode_cache is None:
@@ -93,8 +123,8 @@ class RAGPipeline:
             embeddings = self.embedder.embed_texts([c.text for c in chunks])
             self.store.add_chunks(chunks, embeddings)
 
-        if self._meta_extractor:
-            meta = self._meta_extractor.extract(doc_id, text)
+        if self.meta_extractor:
+            meta = self.meta_extractor.extract(doc_id, text)
             self.store.add_doc_meta(doc_id, meta)
 
     def ingest(self, docs_dir: Path) -> None:
@@ -112,56 +142,63 @@ class RAGPipeline:
         """增量 ingest 单个文档，不清空现有数据（用于运行时文档上传）。"""
         self._ingest_one(path.stem, path.read_text(encoding="utf-8"))
 
-    def query(self, question: str, doc_id: str | None = None, k: int | None = None) -> list[ChunkWindow]:
-        """检索入口。用 span 包裹，使检索与下游生成聚合成同一棵 trace 树。"""
-        with tracing.trace_span("lex_rag.retrieval", question):
-            return self._query_impl(question, doc_id=doc_id, k=k)
+    def query(self, question: str, doc_id: str | None = None, k: int | None = None,
+              strategy: RetrievalStrategy | None = None) -> list[ChunkWindow]:
+        """检索入口。用 span 包裹，使检索与下游生成聚合成同一棵 trace 树。
 
-    def _query_impl(self, question: str, doc_id: str | None = None, k: int | None = None) -> list[ChunkWindow]:
-        k = k or self.cfg.retrieval.top_k
-        fetch_k = self.cfg.retrieval.rerank_top_k if self.reranker else k
+        strategy=None 时从 config 构造默认策略，行为与改造前完全一致。
+        """
+        with tracing.trace_span("lex_rag.retrieval", question):
+            return self._query_impl(question, doc_id=doc_id, k=k, strategy=strategy)
+
+    def _query_impl(self, question: str, doc_id: str | None = None, k: int | None = None,
+                    strategy: RetrievalStrategy | None = None) -> list[ChunkWindow]:
+        st = (strategy or RetrievalStrategy.from_config(self.cfg)).with_top_k(k)
+
+        # 检索用的查询文本：策略可以给一个重写版，默认用原问题。
+        # 注意 rerank 始终用**原问题**打分——重写是为了改善召回，
+        # 相关性判断应当对着用户真正问的东西。
+        search_text = st.query_text or question
 
         chunk_mode = self._get_chunk_mode()
-        children_only = (chunk_mode == "parent_child")
-        mode = self.cfg.retrieval.mode
+        # expand_parent 只在表本身是 parent_child 时才有意义：standard 表里
+        # 没有 parent 行，强行展开只会查空。
+        children_only = (chunk_mode == "parent_child") and st.expand_parent
 
-        if self._expander:
-            variants = self._expander.expand(question)
-            per_k = max(fetch_k // len(variants), 10)
+        if st.use_multi_query:
+            variants = self.expander(st.multi_query_n).expand(search_text)
+            per_k = max(st.fetch_k // len(variants), 10)
             all_results: list[list[ChunkWindow]] = []
             for v in variants:
-                embed_text = self._hyde.generate(v) if self._hyde else v
-                vec = self.embedder.embed_text(embed_text)
-                if mode == "vector":
-                    res = self.store.search_vector(vec, per_k, doc_id, children_only=children_only)
-                elif mode == "bm25":
-                    res = self.store.search_bm25(v, per_k, doc_id, children_only=children_only)
-                else:
-                    res = self.store.search_hybrid(v, vec, per_k, doc_id, children_only=children_only)
-                all_results.append(res)
-            candidates = _rrf_merge(all_results)[:fetch_k]
+                all_results.append(self._search_one(v, per_k, doc_id, st, children_only))
+            candidates = _rrf_merge(all_results)[: st.fetch_k]
         else:
-            embed_text = self._hyde.generate(question) if self._hyde else question
-            query_vec = self.embedder.embed_text(embed_text)
-            if mode == "vector":
-                candidates = self.store.search_vector(query_vec, fetch_k, doc_id,
-                                                       children_only=children_only)
-            elif mode == "bm25":
-                candidates = self.store.search_bm25(question, fetch_k, doc_id,
-                                                     children_only=children_only)
-            elif mode == "hybrid":
-                candidates = self.store.search_hybrid(question, query_vec, fetch_k, doc_id,
-                                                       children_only=children_only)
-            else:
-                raise ValueError(f"Unknown retrieval mode: {mode}")
+            candidates = self._search_one(search_text, st.fetch_k, doc_id, st, children_only)
 
         # parent-child：将 child 替换为 parent（更多上下文供 reranker 使用）
         if children_only:
             candidates = self.store.expand_to_parent(candidates)
 
-        if self.reranker:
-            return self.reranker.rerank(question, candidates, top_k=k)
-        return candidates
+        if st.rerank:
+            return self.reranker.rerank(question, candidates, top_k=st.top_k)
+        return candidates[: st.top_k]
+
+    def _search_one(self, text: str, k: int, doc_id: str | None,
+                    st: RetrievalStrategy, children_only: bool) -> list[ChunkWindow]:
+        """按策略跑一路检索。抽出来是因为 multi-query 要对每个变体重复同样的事。"""
+        if st.mode == "bm25":
+            # BM25 不需要向量，省掉一次 embedding 调用
+            return self.store.search_bm25(text, k, doc_id, children_only=children_only)
+
+        embed_text = self.hyde.generate(text) if st.use_hyde else text
+        vec = self.embedder.embed_text(embed_text)
+        if st.mode == "vector":
+            return self.store.search_vector(vec, k, doc_id, children_only=children_only)
+        if st.mode == "hybrid":
+            # BM25 那一路用原文而不是 HyDE 生成的假设条款：
+            # HyDE 是为了让向量落到条款语义空间，对关键词匹配只会引入噪声。
+            return self.store.search_hybrid(text, vec, k, doc_id, children_only=children_only)
+        raise ValueError(f"Unknown retrieval mode: {st.mode}")
 
     def get_doc_meta(self, doc_id: str) -> dict | None:
         return self.store.get_doc_meta(doc_id)
