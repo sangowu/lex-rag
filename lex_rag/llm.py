@@ -1,11 +1,11 @@
 """
 OpenAI 兼容的对话补全封装 —— 项目里所有 LLM 调用的唯一入口。
 
-当前指向 Z.ai 的 GLM（`https://api.z.ai/api/paas/v4/`，key 取自 `GENERATE_MODEL_API`）。
-换服务商只需改 `config.yaml` 的 `contextual.base_url` / `contextual.model`，
-不需要动任何调用方——前提是对方兼容 OpenAI 的 `/chat/completions`。
+实际用哪个模型由 `config.yaml` 的 `contextual.base_url` / `contextual.model` 决定
+（当前是 DashScope 的 qwen3.7-flash），key 取自 `GENERATE_MODEL_API`。换服务商只改
+配置，不需要动任何调用方——前提是对方兼容 OpenAI 的 `/chat/completions`。
 
-从 Gemini 迁移过来时有两点行为差异，调用方需要知道：
+下面两条差异是从 Gemini 迁移时发现的，对所有 OpenAI 风格的服务商都成立：
 
 1. **结构化输出的强制力变弱了。** Gemini 用 `response_schema` 在服务端强制 JSON
    结构；OpenAI 风格只有 `response_format={"type": "json_object"}`，只保证语法是
@@ -34,8 +34,10 @@ from typing import Any
 
 from lex_rag import tracing
 
-DEFAULT_BASE_URL = "https://api.z.ai/api/paas/v4/"
-DEFAULT_MODEL = "glm-4.7-flash"
+# 仅当调用方没给 base_url/model 时兜底。正常路径都从 config.yaml 来，
+# 这里保持与当前配置一致，避免"默认值和实际配置矛盾"这种排查陷阱。
+DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+DEFAULT_MODEL = "qwen3.7-flash"
 
 
 class LLMError(RuntimeError):

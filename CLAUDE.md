@@ -215,40 +215,53 @@ eval_ocr.py（本地，按 --batch-size 成批）
 
 ### 当前最优配置
 
-**检索层**（律所/法务场景，hit@1 和 mrr@5 为核心指标）：
+**检索层**（律所/法务场景，hit@1 和 mrr@5 为核心指标）。
+Run: `20260824T230237Z`，1000 条 CUAD QA：
 
 | 参数 | 值 |
 |------|----|
-| table | chunks_qwen3 |
-| embedding | Qwen/Qwen3-Embedding-0.6B ⚠️ 已换成 SiliconFlow `BAAI/bge-m3` |
+| table | chunks |
+| embedding | SiliconFlow `BAAI/bge-m3`（1024 维） |
 | chunk_chars | 1000 / overlap=100 / strategy=recursive |
 | mode | hybrid（vector + BM25 RRF 融合） |
-| reranker | bge-reranker-v2-m3，top_k=60 |
-| contextual | gemini-3.1-flash-lite ⚠️ 已换成 `glm-4.7-flash` |
-| **hit@1** | **0.580** / **mrr@5=0.667** / hit@5=0.804 / hit@10=0.890 |
+| reranker | SiliconFlow `BAAI/bge-reranker-v2-m3`，rerank_top_k=60，batch_size=60 |
+| contextual | 未开启 |
+| **hit@1** | **0.541** / **mrr@5=0.640** / hit@5=0.815 / hit@10=0.865 / recall@5=0.748 |
 
-> ⚠️ **上表是 Qwen3-Embedding 时期的数字。** 换 embedding 模型后旧向量不可用（同为 1024 维
-> 但语义空间不同，混用会静默给出错误的相似度），必须 `--refresh-cache` 重灌后重跑基线。
-
-> 召回优先场景（尽职调查/合规审查）改用 `chunks_contextual`（BGE-M3，rerank_top_k=60）：hit@5=**0.833**
+> **与迁移前同配置对比无退化**：`docs/baseline.md` 阶段四"无 Contextual + overlap=100"
+> 一行（自建 BGE-M3）是 hit@1=0.516 / hit@10=0.843 / mrr@5=0.631，本次分别为
+> 0.541 / 0.865 / 0.640。同一个 bge-m3 换了托管方，向量质量一致。
+>
+> 历史最优 hit@1=0.580 是 `chunks_qwen3` + **开启 contextual** 的配置，与上表不是同一组
+> 参数，**不可直接比较**。要复现需重跑一次 contextual ingest（每 chunk 调一次 LLM）。
 
 > 生成层 v1–v3 的历史指标与配置见 `docs/experiments.md`。
 
-**生成层当前最优 v4**（Run: `20260530T143927Z`，200样本，30样本 RAGAS）：
+**生成层当前最优 v5**（Run: `20260826T*`，200 样本，30 样本 judge，`errors=0`，`n_judge_failed=0`）：
 
-| 指标 | 值 | vs v2 | vs v3 |
-|------|----|-------|-------|
-| semantic_hit_rate | **0.820**（threshold=0.70） | ▲▲ +0.080 | ▲ +0.060 |
-| false_positive_rate | 0.200 | = | ▼ +0.013 |
-| false_negative_rate | **0.040** | = | ▲▲ -0.060 |
-| faithfulness | **0.667** | ▲▲ +0.167 | = |
-| answer_relevancy | **0.967** | = | ▲ +0.100 |
-| avg_latency_ms | 756 | ≈ | ≈ |
+| 指标 | v5 (qwen3.7-flash) | v4 (Gemini) | 说明 |
+|------|-------------------|-------------|------|
+| **false_positive_rate** | **0.120** | 0.200 | ✅ 编造答案少近一半 |
+| false_negative_rate | 0.060 | 0.040 | 基本追平 |
+| semantic_hit_rate | 0.800 | 0.820 | 基本追平 |
+| 判别力 J | **0.820** | — | 正确拒答率 − 误拒率 |
+| answer_relevancy | 0.857 | 0.967 | ⚠️ judge 不同，不可比 |
+| faithfulness | 0.500 | 0.667 | ⚠️ judge 不同，不可比 |
+| avg_latency_ms | 7774 | 756 | ❌ thinking 的代价 |
 
-配置：JSON mode（当时是 Gemini）+ 逐字引用约束 + few-shot 示例 + **doc_meta 注入** + **RAGAS judge 包含 doc_meta 上下文** + reranker，top_k=10，generate_k=8
+配置：qwen3.7-flash + `thinking=true` + `json_object` + KIND A/B 分流 prompt + 逐字引用约束
++ few-shot + reranker，top_k=10，generate_k=8；judge = qwen3.7-plus（不同家族，避免自评偏袒）
 
-> **全面突破**：semantic_hit 创新高（0.820），faithfulness 维持 v3 水平（0.667），FN 恢复 v2 最低（0.040），relevancy 恢复 0.967。
-> 根因：RAGAS judge 看到 doc_meta 后能正确验证元数据来源的答案，消除了测量偏差。
+> **judge 换了模型，faithfulness / answer_relevancy 与 v4 不可比**——那是两把尺子。
+> FP / FN / semantic_hit 不依赖 judge，只有这三行的对比成立。
+> 选定 judge 后应冻结不动，否则每换一次就切断一次历史可比性。
+>
+> 剩余差距是延迟（7.8s vs 756ms），全部来自 thinking。关掉可降到 855ms，但判别力 J 从
+> 0.60 掉到 0.40（横评数据）。可行的优化方向是按问题类型分流：KIND B 事实抽取走无
+> thinking 的快速路径，KIND A 条款存在性才开 thinking。
+>
+> 迁移过程中的失败定位（GLM 拒答门塌陷、thinking 的双向效应、json_schema 无效）
+> 见 `docs/experiments.md`。
 
 ## 关键约束
 
