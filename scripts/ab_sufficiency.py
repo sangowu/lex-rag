@@ -327,6 +327,15 @@ def main() -> None:
     print(f"\nSaved → {out}")
 
 
+def _fmt(v) -> str:
+    """指标格式化：率保留三位，毫秒/计数取整，缺失打横杠。"""
+    if v is None:
+        return "-"
+    if isinstance(v, float):
+        return f"{v:.3f}" if v < 10 else f"{v:.0f}"
+    return str(v)
+
+
 def report(p: dict) -> None:
     a, b = p["arms"]["A_single_thinking"], p["arms"]["B_two_stage"]
     print("\n" + "=" * 74)
@@ -339,11 +348,7 @@ def report(p: dict) -> None:
         ("avg_llm_calls", "越低越好"), ("errors", "越低越好"),
     ]
     for key, direction in rows:
-        va, vb = a.get(key), b.get(key)
-        fmt = (lambda v: "-" if v is None else
-               (f"{v:.3f}" if isinstance(v, float) and v < 10 else f"{v:.0f}"
-                if isinstance(v, float) else str(v)))
-        print(f"{key:26s} {fmt(va):>16s} {fmt(vb):>13s} {direction:>8s}")
+        print(f"{key:26s} {_fmt(a.get(key)):>16s} {_fmt(b.get(key)):>13s} {direction:>8s}")
     print("-" * 74)
     print(f"{'B 臂翻成拒答':26s} {b['n_flipped_to_refusal']:>16d}")
     print(f"{'B 臂升级重跑':26s} {b['n_escalated']:>16d}")
@@ -354,8 +359,7 @@ def report(p: dict) -> None:
     js, ju = p["judges"]["specialized"], p["judges"]["unified"]
     for key in ("accuracy", "fp_rate", "fn_rate", "oos_recall_on_no_answer",
                 "oos_falsealarm_on_has_answer", "avg_latency_ms", "n_judge_errors"):
-        f = lambda v: "-" if v is None else (f"{v:.3f}" if isinstance(v, float) else str(v))
-        print(f"{key:30s} {f(js.get(key)):>14s} {f(ju.get(key)):>12s}")
+        print(f"{key:30s} {_fmt(js.get(key)):>14s} {_fmt(ju.get(key)):>12s}")
     print("-" * 74)
     print("fp_rate = gold 不在上下文却判定「够了」→ 提前停止，答案必错")
     print("fn_rate = gold 已在上下文却判定「不够」→ 白烧一轮")

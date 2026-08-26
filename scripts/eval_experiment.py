@@ -38,7 +38,6 @@ from lex_rag.cuad import load_qa, QAItem
 from lex_rag.embeddings import EmbeddingClient
 from lex_rag.generator import LegalGenerator
 from lex_rag.pipeline import RAGPipeline
-from lex_rag import tracing
 
 DATASET_NAME = "cuad-gen-eval"
 
