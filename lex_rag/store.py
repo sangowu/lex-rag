@@ -148,8 +148,15 @@ class VectorStore:
         seen_parent_ids: list[str] = []
         seen_set: set[str] = set()
         no_parent: list[ChunkWindow] = []
+        # parent 继承命中它的 child 里最高的那个分数——parent 自己没有被检索过，
+        # 不继承的话 trace 里这一段就是一片 None，没法判断召回质量。
+        parent_score: dict[str, tuple[float, str | None]] = {}
         for child in children:
             pid = id_to_parent.get(child.chunk_id)
+            if pid and child.score is not None:
+                prev = parent_score.get(pid)
+                if prev is None or child.score > prev[0]:
+                    parent_score[pid] = (child.score, child.score_kind)
             if pid and pid not in seen_set:
                 seen_parent_ids.append(pid)
                 seen_set.add(pid)
@@ -165,9 +172,10 @@ class VectorStore:
                     WHERE chunk_id = ANY(%s)
                 """, (seen_parent_ids,))
                 for row in cur.fetchall():
+                    sc, kind = parent_score.get(row[0], (None, None))
                     parent_map[row[0]] = ChunkWindow(
                         chunk_id=row[0], doc_id=row[1], text=row[2],
-                        start=row[3], end=row[4],
+                        start=row[3], end=row[4], score=sc, score_kind=kind,
                     )
 
         result = [parent_map[pid] for pid in seen_parent_ids if pid in parent_map]
@@ -224,24 +232,30 @@ class VectorStore:
         vec = np.array(query_vec)
         child_filter = "AND parent_chunk_id IS NOT NULL" if children_only else ""
         with self.conn.cursor() as cur:
+            # 距离进 SELECT 列表并按别名排序：ORDER BY 引用输出别名时 Postgres 会
+            # 解析回原表达式，pgvector 索引照常命中，但分数拿得到了。
             if doc_id is not None:
                 cur.execute(f"""
-                    SELECT chunk_id, doc_id, text, start_pos, end_pos
+                    SELECT chunk_id, doc_id, text, start_pos, end_pos,
+                           embedding <=> %s AS dist
                     FROM {self.table}
                     WHERE doc_id = %s {child_filter}
-                    ORDER BY embedding <=> %s
+                    ORDER BY dist
                     LIMIT %s
-                """, (doc_id, vec, k))
+                """, (vec, doc_id, k))
             else:
                 cur.execute(f"""
-                    SELECT chunk_id, doc_id, text, start_pos, end_pos
+                    SELECT chunk_id, doc_id, text, start_pos, end_pos,
+                           embedding <=> %s AS dist
                     FROM {self.table}
                     WHERE TRUE {child_filter}
-                    ORDER BY embedding <=> %s
+                    ORDER BY dist
                     LIMIT %s
                 """, (vec, k))
             rows = cur.fetchall()
-        return [ChunkWindow(chunk_id=r[0], doc_id=r[1], text=r[2], start=r[3], end=r[4]) for r in rows]
+        # 距离转相似度：让所有 score 统一为"越大越相关"
+        return [ChunkWindow(chunk_id=r[0], doc_id=r[1], text=r[2], start=r[3], end=r[4],
+                            score=1.0 - float(r[5]), score_kind="cosine_sim") for r in rows]
 
     def search_bm25(self, query: str, k: int,
                     doc_id: str | None = None,
@@ -254,25 +268,28 @@ class VectorStore:
                 return []
             if doc_id is not None:
                 cur.execute(f"""
-                    SELECT chunk_id, doc_id, text, start_pos, end_pos
+                    SELECT chunk_id, doc_id, text, start_pos, end_pos,
+                           ts_rank_cd(tsv, to_tsquery('english', %s)) AS rank
                     FROM {self.table}
                     WHERE doc_id = %s
                       AND tsv @@ to_tsquery('english', %s)
                       {child_filter}
-                    ORDER BY ts_rank_cd(tsv, to_tsquery('english', %s)) DESC
+                    ORDER BY rank DESC
                     LIMIT %s
-                """, (doc_id, tsq_or, tsq_or, k))
+                """, (tsq_or, doc_id, tsq_or, k))
             else:
                 cur.execute(f"""
-                    SELECT chunk_id, doc_id, text, start_pos, end_pos
+                    SELECT chunk_id, doc_id, text, start_pos, end_pos,
+                           ts_rank_cd(tsv, to_tsquery('english', %s)) AS rank
                     FROM {self.table}
                     WHERE tsv @@ to_tsquery('english', %s)
                       {child_filter}
-                    ORDER BY ts_rank_cd(tsv, to_tsquery('english', %s)) DESC
+                    ORDER BY rank DESC
                     LIMIT %s
                 """, (tsq_or, tsq_or, k))
             rows = cur.fetchall()
-        return [ChunkWindow(chunk_id=r[0], doc_id=r[1], text=r[2], start=r[3], end=r[4]) for r in rows]
+        return [ChunkWindow(chunk_id=r[0], doc_id=r[1], text=r[2], start=r[3], end=r[4],
+                            score=float(r[5]), score_kind="bm25") for r in rows]
 
     def search_hybrid(self, query: str, query_vec: list[float], k: int,
                       doc_id: str | None = None,
@@ -286,7 +303,14 @@ class VectorStore:
             scores[chunk.chunk_id] += 1 / (rank + 60)
         chunk_map = {c.chunk_id: c for c in vec_results + bm25_results}
         sorted_ids = sorted(scores, key=lambda cid: scores[cid], reverse=True)
-        return [chunk_map[cid] for cid in sorted_ids[:k]]
+        out = []
+        for cid in sorted_ids[:k]:
+            chunk = chunk_map[cid]
+            # 覆盖掉单路的 cosine/bm25 分数：返回的是融合排名，分数也该是融合分，
+            # 否则 trace 里的分数与它自己的名次对不上。
+            chunk.score, chunk.score_kind = scores[cid], "rrf"
+            out.append(chunk)
+        return out
 
     def close(self) -> None:
         self.conn.close()
