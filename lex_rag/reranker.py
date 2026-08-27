@@ -26,10 +26,75 @@ base_url 约定：**不要带 /v1 后缀**（本模块自己拼 `/v1/rerank`）�
 """
 import random
 import sys
+import threading
 import time
 import requests
 from lex_rag.config import RerankConfig
 from lex_rag.chunking import ChunkWindow
+
+# 实测：随机抽 32 条 chunk 走 embedding API（bge-m3，与 bge-reranker-v2-m3 同族
+# 分词器），usage.total_tokens 反推得 4.19 字符/token。这里取 4.0 是**故意偏保守**
+# ——低估字符/token 就是高估 token 数，宁可自己限得紧一点也别去撞服务端的 429。
+_CHARS_PER_TOKEN = 4.0
+
+
+class _TokenBucket:
+    """按 token 计的漏桶，用来贴着服务商的 TPM 上限跑而不是去撞它。
+
+    SiliconFlow 的 reranker 档位是扁平的 RPM 2000 / TPM 500,000（不随消费等级变）。
+    实测 1000 条语料一轮：RPM 58（上限的 2.9%，完全不是瓶颈），**TPM 440,132
+    （88%）**。而 88% 是均值——按合同算瞬时速率，25 份合同里 11 份在处理时超上限，
+    最高 906K（181%）。语料按文档排序，于是那 11 份各有约 40 条连续查询持续跑在
+    1.6~1.8 倍上限上，429 就是这么来的。
+
+    退避能把 429 接住（实测 93 次限流只剩 1 条失败），但那是撞了再退；限速是先看
+    表再走。两者不冲突：这里限速，退避留作兜底。
+    """
+
+    def __init__(self, tokens_per_min: float) -> None:
+        self.capacity = float(tokens_per_min)
+        self.rate = self.capacity / 60.0
+        self._tokens = self.capacity
+        self._last = time.monotonic()
+        self._lock = threading.Lock()
+
+    def acquire(self, n: float) -> float:
+        """等到桶里攒够 n 个 token 再放行，返回实际等待秒数。
+
+        单次请求比整桶还大时不死等——那种情况下限速已经无意义，放行让它去撞
+        服务端，至少错误消息能说明问题；死等只会让整轮循环挂住。
+        """
+        n = min(float(n), self.capacity)
+        waited = 0.0
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                self._tokens = min(self.capacity,
+                                   self._tokens + (now - self._last) * self.rate)
+                self._last = now
+                if self._tokens >= n:
+                    self._tokens -= n
+                    return waited
+                sleep = (n - self._tokens) / self.rate
+            time.sleep(sleep)
+            waited += sleep
+
+
+# 跑批时每个 worker 有自己的 RerankClient（psycopg 连接不能多线程共用），但 TPM
+# 配额是**账号级**的，所以桶必须按 endpoint 共享，不能一人一个。
+_BUCKETS: dict[str, _TokenBucket] = {}
+_BUCKETS_LOCK = threading.Lock()
+
+
+def _bucket_for(url: str, tpm_limit: float) -> _TokenBucket | None:
+    if not tpm_limit or tpm_limit <= 0:
+        return None
+    with _BUCKETS_LOCK:
+        b = _BUCKETS.get(url)
+        if b is None or b.capacity != float(tpm_limit):
+            b = _TokenBucket(tpm_limit)
+            _BUCKETS[url] = b
+        return b
 
 
 def _describe(e: Exception) -> str:
@@ -72,6 +137,13 @@ class RerankClient:
             if base.endswith("/v1"):
                 base = base[: -len("/v1")].rstrip("/")
             self._url = base + "/v1/rerank"
+        self._bucket = _bucket_for(self._url, getattr(cfg, "tpm_limit", 0))
+
+    @staticmethod
+    def _estimate_tokens(body: dict) -> float:
+        """一次请求的 token 估算 = （所有文档 + query）的字符数 / 字符每 token。"""
+        docs = body.get("documents") or body.get("texts") or []
+        return (sum(len(d) for d in docs) + len(body.get("query", ""))) / _CHARS_PER_TOKEN
 
     def _headers(self) -> dict[str, str]:
         """带 api_key 时发 Bearer 认证；自建服务留空则不发（保持原有行为）。"""
@@ -100,6 +172,13 @@ class RerankClient:
         记的是 `str(e)`，于是 1000 条语料里 13 条查询整条 error 掉、排查时只剩
         这一句废话——payload 超限、限流、鉴权失败被压成了同一条消息。
         """
+        # 先按 TPM 限速再发。放在重试循环**外面**：桶已经保证了发送速率，重试是
+        # 兜底路径，再扣一次配额只会让本就落后的请求更落后。
+        if self._bucket is not None:
+            waited = self._bucket.acquire(self._estimate_tokens(body))
+            if waited > 1.0:
+                print(f"[rerank] TPM 限速等待 {waited:.1f}s", file=sys.stderr, flush=True)
+
         last_error: Exception | None = None
         detail = "unknown"
         for attempt in range(self.cfg.max_retries + 1):
