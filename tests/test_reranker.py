@@ -1,5 +1,6 @@
 """Unit tests for RerankClient's batching/sorting logic (network call mocked out)."""
 
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -7,7 +8,7 @@ import requests
 
 from lex_rag.chunking import ChunkWindow
 from lex_rag.config import RerankConfig
-from lex_rag.reranker import RerankClient, _backoff_sec
+from lex_rag.reranker import RerankClient, _TokenBucket, _backoff_sec
 
 
 def _cfg(batch_size: int = 32) -> RerankConfig:
@@ -219,3 +220,66 @@ def test_each_retry_is_announced_on_stderr(capsys):
     err = capsys.readouterr().err
     assert err.count("[rerank]") == 2          # 最后一次失败不再重试，所以不出声
     assert "boom" in err
+
+
+# ── TPM 限速 ────────────────────────────────────────────────────
+# 官方 reranker 档位是扁平的 RPM 2000 / TPM 500000。实测一轮 1000 条语料
+# RPM 58（2.9%）、TPM 440132（88%）——RPM 完全不是瓶颈，TPM 均值就贴着上限，
+# 而按合同算瞬时速率有 11/25 份超限（最高 181%）。见 docs/experiments.md。
+
+def _tpm_cfg(tpm: int, url: str = "https://api.example.com") -> RerankConfig:
+    base = _cloud_cfg(url)
+    return RerankConfig(**{**base.__dict__, "tpm_limit": tpm})
+
+
+def test_bucket_lets_the_first_request_through_immediately():
+    b = _TokenBucket(60_000)
+    assert b.acquire(10_000) == 0.0
+
+
+def test_bucket_makes_the_caller_wait_once_the_budget_is_spent():
+    b = _TokenBucket(60_000)          # 1000 tok/s
+    b.acquire(60_000)                 # 一次性花光
+    t0 = time.monotonic()
+    waited = b.acquire(2_000)         # 还需攒 2000 tok = 2s
+    assert waited >= 1.9
+    assert time.monotonic() - t0 >= 1.9
+
+
+def test_bucket_does_not_deadlock_on_a_request_larger_than_the_bucket():
+    """单次请求比整桶还大时限速已无意义，放行去撞服务端，别把循环挂住。"""
+    b = _TokenBucket(1_000)
+    t0 = time.monotonic()
+    b.acquire(10_000_000)
+    assert time.monotonic() - t0 < 2.0
+
+
+def test_clients_on_the_same_endpoint_share_one_bucket():
+    """TPM 配额是账号级的；跑批时每个 worker 一个 client，桶必须共享。"""
+    a = RerankClient(_tpm_cfg(500_000, "https://shared.example.com"))
+    b = RerankClient(_tpm_cfg(500_000, "https://shared.example.com"))
+    assert a._bucket is b._bucket is not None
+
+
+def test_tpm_limit_zero_disables_pacing():
+    assert RerankClient(_tpm_cfg(0))._bucket is None
+
+
+def test_token_estimate_counts_documents_and_query():
+    body = {"query": "q" * 40, "documents": ["d" * 400, "d" * 400]}
+    # (800 + 40) / 4.0
+    assert RerankClient._estimate_tokens(body) == 210.0
+
+
+def test_pacing_happens_once_per_request_not_once_per_retry():
+    """重试是兜底路径，再扣一次配额只会让本就落后的请求更落后。"""
+    client = RerankClient(_tpm_cfg(500_000, "https://retry.example.com"))
+    client._bucket = MagicMock()
+    client._bucket.acquire.return_value = 0.0
+
+    with patch("lex_rag.reranker.requests.post",
+               side_effect=requests.ConnectionError("boom")):
+        with pytest.raises(RuntimeError):
+            client._score_batch("query", ["a"])
+
+    client._bucket.acquire.assert_called_once()

@@ -57,6 +57,7 @@ class RerankConfig:
     batch_size: int
     max_retries: int
     retry_backoff_sec: float
+    tpm_limit: int = 0          # 客户端 TPM 限速上限，0 = 不限速
 
 @dataclass
 class EvalConfig:
@@ -175,6 +176,7 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         batch_size=rr.get("batch_size", 32),
         max_retries=rr.get("max_retries", 2),
         retry_backoff_sec=rr.get("retry_backoff_sec", 1.0),
+        tpm_limit=rr.get("tpm_limit", 0),
     )
 
     eval_config = EvalConfig(

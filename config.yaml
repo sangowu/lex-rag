@@ -43,6 +43,12 @@ reranker:
   # 服务端抖动超过 8.5 秒就整条 error 掉（见 docs/experiments.md）。
   max_retries: 4
   retry_backoff_sec: 1.0
+  # 客户端限速：贴着服务商的 TPM 上限跑，而不是去撞它再退避。
+  # SiliconFlow 的 reranker 档位是扁平的 RPM 2000 / TPM 500000（不随消费等级变）。
+  # 实测一轮 1000 条语料：RPM 58（上限的 2.9%，完全不是瓶颈），TPM 440132（88%）。
+  # 88% 是均值——按合同算瞬时速率，25 份合同里 11 份超上限，最高 906K（181%）。
+  # 这里留 10% 余量。0 = 关闭限速。
+  tpm_limit: 450000
 
 database:
   host: localhost
