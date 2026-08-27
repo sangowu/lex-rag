@@ -58,6 +58,20 @@ class EmbeddingClient:
             with open(self._cache_path, "wb") as f:
                 pickle.dump(self._cache, f)
 
+    def attach_shared_cache(self, cache: dict[str, list[float]]) -> None:
+        """改用外部传入的缓存字典，并**关闭本实例的落盘**。
+
+        并发跑批时每个 worker 要有自己的 pipeline（psycopg 连接不能多线程共用），
+        但 embedding 缓存应该共享——否则同一段文本会被每个 worker 各嵌一次。
+        直接共享一个 dict 就够：`in` 与 `[]=` 在 GIL 下是原子的，最坏情况是两个
+        worker 同时错过同一个 key、各算一次，代价可以接受。
+
+        落盘必须关掉：`_save_cache` 每次 miss 都 `pickle.dump` 整个字典，多线程
+        同时写同一个文件会写出半截文件。跑完由调用方在主线程存一次。
+        """
+        self._cache = cache
+        self._cache_path = None
+
     def _delete_cache_file(self) -> None:
         if self._cache_path and self._cache_path.exists():
             self._cache_path.unlink()
