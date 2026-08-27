@@ -272,3 +272,82 @@ def test_fallback_prefers_the_judges_hint(hint, expected_mode):
     s = StrategySelector(_cfg())
     st, _ = s.fallback(RetrievalStrategy(), set(), hint)
     assert st.mode == expected_mode
+
+
+# ── 累积池必须真的被重排（否则多轮是空操作）─────────────────────
+# 上一版 `_rank_pool` 开头是 `if len(pool) <= cap: return pool`，而 cap=30、
+# contract scope 下 pool 实测最大 17 —— 分支每次都命中，reranker 一次没调过，
+# 新片段永远落在第 11 位往后，而 judge 和调用方只看前 10 个。1000 条语料里
+# 288 条多轮查询的最终 top-10 与第 0 轮**逐位相同**。见 docs/experiments.md。
+
+def _reranking_pipeline(results, order):
+    """带 reranker 的替身：rerank 按 `order` 里的 chunk_id 顺序重排。"""
+    p = _pipeline(results)
+    p.cfg.reranker.enabled = True
+    p.reranker.rerank.side_effect = lambda q, chunks, top_k: sorted(
+        chunks, key=lambda c: order.index(c.chunk_id))[:top_k]
+    return p
+
+
+def test_accumulated_pool_is_reranked_even_when_it_fits_under_cap():
+    """池子没超上限也要重排——排序和截断是两件事。"""
+    p = _reranking_pipeline(
+        [_chunks(["a", "b"]), _chunks(["c", "d"])],
+        order=["c", "a", "d", "b"],          # 第二轮的 c 应该被排到最前
+    )
+    a = _agent(p, [Verdict(sufficient=False), Verdict(sufficient=True)],
+               actions=[("bm25", RetrievalStrategy(mode="bm25"))], max_iterations=3)
+    chunks, _ = a.query("q", k=4)
+
+    assert [c.chunk_id for c in chunks] == ["c", "a", "d", "b"]
+    p.reranker.rerank.assert_called_once()
+
+
+def test_new_chunks_can_reach_the_top_k_the_judge_sees():
+    """第二轮捞到的片段必须能进入前 k —— 否则多轮对输出毫无影响。"""
+    p = _reranking_pipeline(
+        [_chunks(["a", "b"]), _chunks(["new"])],
+        order=["new", "a", "b"],
+    )
+    judge = MagicMock()
+    judge.judge.side_effect = [Verdict(sufficient=False), Verdict(sufficient=True)]
+    sel = MagicMock()
+    sel.select.side_effect = [(RetrievalStrategy(mode="bm25"), "换 bm25", "P", "R")]
+    a = AgenticPipeline(p, _cfg(), judge=judge, selector=sel, max_iterations=3)
+    a.query("q", k=2)
+
+    seen = [c.chunk_id for c in judge.judge.call_args_list[-1].args[1]]
+    assert "new" in seen
+
+
+def test_first_round_is_not_reranked_twice():
+    """第 0 轮的结果已被检索层排好，再 rerank 一次是白花一次 API 往返。"""
+    p = _reranking_pipeline([_chunks(["a", "b"])], order=["a", "b"])
+    a = _agent(p, [Verdict(sufficient=True)])
+    a.query("q")
+    p.reranker.rerank.assert_not_called()
+
+
+def test_round_that_finds_nothing_new_is_not_reranked():
+    """去重后没长出新片段时重排也是同样的输入同样的输出。"""
+    p = _reranking_pipeline(
+        [_chunks(["a", "b"]), _chunks(["a", "b"])],   # 第二轮全是重复
+        order=["a", "b"],
+    )
+    a = _agent(p, [Verdict(sufficient=False), Verdict(sufficient=True)],
+               actions=[("bm25", RetrievalStrategy(mode="bm25"))], max_iterations=3)
+    a.query("q")
+    p.reranker.rerank.assert_not_called()
+
+
+def test_rerank_failure_falls_back_to_plain_truncation():
+    """重排失败不该让整轮循环挂掉。"""
+    p = _pipeline([_chunks(["a", "b"]), _chunks(["c"])])
+    p.cfg.reranker.enabled = True
+    p.reranker.rerank.side_effect = RuntimeError("rerank down")
+    a = _agent(p, [Verdict(sufficient=False), Verdict(sufficient=True)],
+               actions=[("bm25", RetrievalStrategy(mode="bm25"))], max_iterations=3)
+    chunks, trace = a.query("q", k=3)
+
+    assert [c.chunk_id for c in chunks] == ["a", "b", "c"]
+    assert trace[-1] == "terminated_by=sufficient"
