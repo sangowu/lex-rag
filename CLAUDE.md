@@ -110,6 +110,16 @@ uv run scripts/serve.py                          # http://127.0.0.1:6800/ui
   embedding 与 reranker 来自同一服务商时，host 相同、后缀不同，是最容易配错的地方。
 - **reranker 认证**：`RERANK_API_KEY` 未设置时回落到 `EMBED_API_KEY`（同一服务商只配一个即可）。
   key 为空则不发 `Authorization` 头，保持自建 TEI / llama.cpp 的原有行为。
+- **reranker 重试是指数退避 + 抖动**（`_backoff_sec`），不是固定间隔。原来固定 1.0s 时，
+  失败查询的重试窗口中位只有 8.45s，服务端抖动超过 8.5 秒就整条 error 掉（约 1.3% 查询）；
+  且没有抖动会让 4 个 worker 锁步重试（实测两条查询相隔 **0.019s** 同时耗尽重试）。
+  失败消息**必须带服务端响应体**——限流 / 鉴权 / 超限在服务端是三种不同回复，
+  压成 "failed after N retries" 就无从排查。每次重试往 stderr 响一行，否则
+  "没故障"与"故障被重试盖住"分不开。`embeddings.py` / `llm.py` 仍是固定退避。
+- ⚠️ **`data/qa_cuad.jsonl` 按文档排序**（1000 条 / 25 份合同 / 恰好 25 个连续段），
+  每份合同的约 40 条问题挤在同一分钟内。所以**任何时间上成簇的故障都会看起来像
+  文档成簇**——按 doc_id 做故障直方图之前先想这一条。我为此把一次限流误判成
+  "payload 最大的合同稳定失败"，见 `docs/experiments.md`。
 - **换 embedding 模型要看维度**：`chunks.embedding` 是 `vector(1024)`，维度变了必须改表结构 + 全量重灌。
 - **可观测性**：配 `.env` 的 `LANGFUSE_*` 后，在线问答自动上报 trace 树、`eval_experiment` 上报 Experiment scores；未配则完全 no-op（见 `lex_rag/tracing.py`）。
 

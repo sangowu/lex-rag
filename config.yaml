@@ -38,7 +38,10 @@ reranker:
   # 原值 8 是本地 8GB 显存 GPU 时期的显存约束；换成托管 API 后每查询要打 8 次
   # 往返，实测 10.3 s/条，改成 60 后单请求约 2s。
   batch_size: 60
-  max_retries: 3
+  # 重试窗口按指数退避展开：1s -> 2s -> 4s -> 8s，各带 [0.5,1.5) 倍抖动。
+  # 4 次重试把窗口拉到 13~28s。原来是固定 1.0s，实测失败查询中位只熬了 8.45s，
+  # 服务端抖动超过 8.5 秒就整条 error 掉（见 docs/experiments.md）。
+  max_retries: 4
   retry_backoff_sec: 1.0
 
 database:
