@@ -603,3 +603,100 @@ reranker 被限流）。原因是 runner 只统计从 `query()` 抛出来的异�
 **摘要撒了谎**。已修：runner 现在也检查 `trace[-1]`。
 
 > 顺带一提，no_rerank 组 0 错误，与"错误全部来自 reranker"这个判断一致。
+
+---
+
+# 判定器的 KIND A/B 分流（2026-08-27，两轮 ×1000 条）
+
+上一节把白烧率 0.624 定为"下一步最该动的地方"。动完了，这是过程与结果。
+
+## 病因：同一个坑踩了第二次
+
+先从已有语料里翻白烧的 261 条到底长什么样，**不跑任何新实验**。按 CUAD 问题
+模板分组后，白烧明显分成两簇：
+
+| | 白烧 | 正确停止 | 白烧率 |
+|---|---|---|---|
+| 条款存在性（License Grant、Governing Law、Insurance…） | 63 | 90 | 0.41 |
+| **事实抽取（Document Name、Parties、Expiration Date…）** | **198** | **67** | **0.75** |
+
+最极端的几个：Document Name 39/2（0.95）、Parties 45/5（0.90）、Expiration Date
+39/5（0.89）；而 License Grant 0.00、Governing Law 0.13。
+
+判定器的原话直接给出了机制——它在找一个**标着**该概念的条款：
+
+> "The excerpts do not contain the contract's title or document name."（标题就在上下文里）
+> "The excerpts contain signature blocks for Shelby J. Butterfield and the Butterfield
+> Family Trust, but do not explicitly define or list all 'Parties'"（签名块就是当事方）
+
+这与生成层 v4 的误拒形态完全相同，而生成层 v5 已经用 KIND A / KIND B 分流把它
+修好了（误拒 0.120 → 0.060）。`sufficiency.py` 的 prompt 是 #24 新写的，写的是
+"sufficient only if the text that answers it is literally present"——**正是 v5
+之前那句害人的话**。同一个坑，两个模块各踩一次。
+
+## 离线重放：先用 36 次 LLM 调用确认方向
+
+改完 prompt 不直接跑 25 分钟全量，先从旧语料里挑 24 条白烧样本 + 12 条正确停止
+样本，**只重放 judge、不重新检索**（chunk_id 回查文本即可）。翻转 18/24，
+正确停止被翻掉 0/12。方向确认后才跑全量。
+
+## 两轮全量的结果
+
+| | 旧基线 | v1 | **v2（采纳）** |
+|---|---|---|---|
+| accuracy | 0.469 | 0.694 | **0.637** |
+| 白烧率 | 0.624 | 0.345 | **0.425** |
+| 提前停止率 | 0.026 | **0.135** | **0.068** |
+| out_of_scope 的 J | 0.677 | **0.460** | **0.639** |
+| 误拒 | 0.083 | 0.032 | 0.082 |
+| 平均轮数 | 1.46 | 1.41 | 1.51 |
+
+语料：`20260827T015344Z`（旧）/ `20260827T104056Z`（v1）/ `20260827T111059Z`（v2）。
+
+**v1 破了门禁**：提前停止率 0.026 → 0.135，同时判定器 `out_of_scope` 的判别力
+从 0.677 塌到 0.460（正确拒答率 0.760 → 0.492）。
+
+## v1 出错的地方：一句写得太宽的通则
+
+v1 里除了 KIND A/B 分流，还加了一条"For both kinds"的通则，大意是"insufficient
+必须意味着再检索有用；合同本身就没写得更精确时别判不充分"。查损失落点：
+
+    KIND B（prompt 明确列出的事实抽取类）  流失  16/29
+    KIND A（其余，即条款存在性）          流失 189/510
+
+**205 条丢掉的正确拒答里 189 条是 KIND A。** 对一个 KIND A 无答案问题，判定器把
+那句通则读成"上下文已覆盖、再检索也没用 → 别判不充分"，于是选了 `sufficient`
+而不是 `out_of_scope`。
+
+v2 把这条通则按类型收窄：KIND A 的出口明确写成 `out_of_scope: true`（并加一句
+"Never call it sufficient"），KIND B 的出口才是 `sufficient`。J 随即回到 0.639。
+
+> 顺带的教训：这条通则在离线重放上只把白烧翻转从 18/24 抬到 19/24（噪声内），
+> 却在全量上花掉 189 条正确拒答。**小样本重放能证伪方向，不能标定副作用**——
+> 副作用落在重放里根本没有的那 719 条无答案样本上。
+
+## 必须更正的一个说法
+
+上一节写的是"白烧只多花钱"，暗示降白烧能省钱。**净成本没降**：平均轮数从 1.46
+升到 1.51。省下的 114 个白烧轮次落在有答案样本上，被无答案样本上少触发的 21 次
+`out_of_scope` 提前退出抵消了。
+
+这次买到的是判断质量（accuracy 0.469 → 0.637，判定器正确识别"已经够了" 157 → 199
+次），不是成本。要省成本得另外动手。
+
+## 顺带修掉的：判定器上下文被按字符截断
+
+`_context()` 原本是 `text[:max_context_chars]`，会把最后一条 chunk 切成半句。
+判定器读到半句话正好会报 `clause_context`（"相关条款在，但被截断了"），而那个
+截断是我们自己造的；照着这个 hint 换 parent 策略再跑一轮，又是一轮白烧。改成
+按 chunk 边界丢，预算不变。
+
+## 未修：reranker 在最大 payload 上稳定失败
+
+两轮全量各有 13~14 条 `terminated_by=error`，全部是
+`_score_batch failed after 3 retries`。**不是随机抖动**——集中在少数几份合同上
+（BON-TON 占 10/14 和 8/13），而 BON-TON 有 180 个 chunk，是全库最多的，每次都能
+填满 `rerank_top_k=60` 的整批（约 60k 字符）。其余合同 chunk 数不够，payload 天然
+更小。即"payload 最大的那些查询稳定失败"，约 1.3% 的查询因此整条 error 掉。
+
+不在本次改动范围内（一个分支只做一件事），但下次动 reranker 时应从这里开始。
