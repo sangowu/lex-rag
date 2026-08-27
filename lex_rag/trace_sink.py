@@ -41,6 +41,7 @@ import contextlib
 import json
 import os
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -314,6 +315,8 @@ class TraceSink:
         self._counter = 0
         self._warned = False
         self._fh: Any = None
+        # 跑批时多个 worker 同时写：一次查询一行的前提是这一行不被别人插进来。
+        self._lock = threading.Lock()
         self._open()
 
     def _open(self) -> None:
@@ -343,13 +346,20 @@ class TraceSink:
     def _write_raw(self, obj: dict) -> None:
         if self._fh is None:
             return
+        # 序列化放在锁外：它是纯 CPU 的活，占着锁会把并发写压成串行。
         try:
-            self._fh.write(json.dumps(obj, ensure_ascii=False) + "\n")
-            self._fh.flush()
-            # flush 只到 libc 缓冲；崩溃时靠 fsync 才真正落盘。全量语料是几小时
-            # 的算力，值这点开销。
-            with contextlib.suppress(Exception, AttributeError):
-                os.fsync(self._fh.fileno())
+            line = json.dumps(obj, ensure_ascii=False) + "\n"
+        except Exception as e:
+            self._warn(f"序列化失败：{type(e).__name__}: {e}")
+            return
+        try:
+            with self._lock:
+                self._fh.write(line)
+                self._fh.flush()
+                # flush 只到 libc 缓冲；崩溃时靠 fsync 才真正落盘。全量语料是几
+                # 小时的算力，值这点开销。
+                with contextlib.suppress(Exception, AttributeError):
+                    os.fsync(self._fh.fileno())
         except Exception as e:
             self._warn(f"{type(e).__name__}: {e}")
 
@@ -357,8 +367,9 @@ class TraceSink:
     def query(self, question: str, doc_id: str | None = None,
               meta: dict | None = None) -> Iterator[QueryWriter]:
         """一次查询的 with 块。**异常也会落盘**——崩掉的那条最值得留。"""
+        with self._lock:
+            self._counter += 1
         qw = QueryWriter(self, question, doc_id, meta)
-        self._counter += 1
         try:
             yield qw
         except Exception as e:

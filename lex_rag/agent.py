@@ -280,8 +280,13 @@ class AgenticPipeline:
         question: str,
         doc_id: str | None = None,
         k: int = 10,
+        meta: dict | None = None,
     ) -> Iterator[str | tuple[list[ChunkWindow], list[str]]]:
-        """先 yield str 状态消息，最后 yield (chunks, query_trace)。"""
+        """先 yield str 状态消息，最后 yield (chunks, query_trace)。
+
+        `meta` 原样写进 trace 的 meta 字段。跑语料时用它带上样本 id 与 gold 标签，
+        让语料自包含——下游分析不必再回头 join qa 文件。
+        """
         base = RetrievalStrategy.from_config(self.pipeline.cfg).with_top_k(k)
         strategy = base
         tried: list[tuple[str, str]] = []
@@ -290,7 +295,7 @@ class AgenticPipeline:
         terminated_by = "max_rounds"
         verdict: Verdict | None = None
 
-        qctx = (self.sink.query(question, doc_id=doc_id, meta={"k": k})
+        qctx = (self.sink.query(question, doc_id=doc_id, meta={"k": k, **(meta or {})})
                 if self.sink is not None else _NullCtx())
         with qctx as qt:
             for rnd in range(self.max_iterations):
@@ -389,9 +394,10 @@ class AgenticPipeline:
         question: str,
         doc_id: str | None = None,
         k: int = 10,
+        meta: dict | None = None,
     ) -> tuple[list[ChunkWindow], list[str]]:
         """普通调用（API / eval 用），不产生状态消息。"""
-        for event in self.query_stream(question, doc_id=doc_id, k=k):
+        for event in self.query_stream(question, doc_id=doc_id, k=k, meta=meta):
             if not isinstance(event, str):
                 return event
         return [], [question]

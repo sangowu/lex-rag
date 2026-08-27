@@ -1,4 +1,5 @@
 from collections import defaultdict
+import contextlib
 import json
 import numpy as np
 import psycopg
@@ -7,18 +8,40 @@ from lex_rag.chunking import ChunkWindow
 
 
 class VectorStore:
-    def __init__(self, dsn: str, table: str = "chunks"):
+    def __init__(self, dsn: str, table: str = "chunks", init_schema: bool = True):
         self.conn = psycopg.connect(dsn)
         self.table = table
-        with self.conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
         self.conn.commit()
         register_vector(self.conn)
-        self._init_schema()
+        if init_schema:
+            self._init_schema()
+
+    @contextlib.contextmanager
+    def _cursor(self):
+        """取游标，**出错时回滚**。
+
+        psycopg 在事务中遇到任何错误后，该连接上的后续语句一律报
+        `InFailedSqlTransaction`，直到显式 rollback。不回滚的话，一次瞬时错误
+        （并发 DDL 死锁、语句超时、网络抖动）会把连接**永久**报废——而 `serve.py`
+        是长驻进程，症状会是"从此所有查询都失败"，而不是"那一次失败"，排查时
+        极容易看错方向。
+
+        实测：4 个 worker 同时构造 VectorStore 触发 DDL 死锁后，同一批 20 条里
+        15 条全部报 InFailedSqlTransaction，真正的死锁只发生过一次。
+        """
+        try:
+            with self.conn.cursor() as cur:
+                yield cur
+        except Exception:
+            with contextlib.suppress(Exception):
+                self.conn.rollback()
+            raise
 
     def _init_schema(self) -> None:
         t = self.table
-        with self.conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
             cur.execute(f"""
                 CREATE TABLE IF NOT EXISTS {t} (
@@ -79,7 +102,7 @@ class VectorStore:
 
     def save_meta(self, chunk_chars: int, overlap: int, strategy: str,
                   contextual: bool, chunk_mode: str = "standard") -> None:
-        with self.conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.execute("""
                 INSERT INTO ingest_meta
                     (table_name, chunk_chars, overlap, strategy, contextual, chunk_mode, ingested_at)
@@ -95,7 +118,7 @@ class VectorStore:
         self.conn.commit()
 
     def load_meta(self) -> dict | None:
-        with self.conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.execute("""
                 SELECT chunk_chars, overlap, strategy, contextual, chunk_mode, ingested_at
                 FROM ingest_meta WHERE table_name = %s
@@ -113,12 +136,12 @@ class VectorStore:
         }
 
     def truncate(self) -> None:
-        with self.conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.execute(f"TRUNCATE TABLE {self.table}")
         self.conn.commit()
 
     def add_chunks(self, chunks: list[ChunkWindow], embeddings: list[list[float]]) -> None:
-        with self.conn.cursor() as cur:
+        with self._cursor() as cur:
             for chunk, embedding in zip(chunks, embeddings):
                 cur.execute(f"""
                     INSERT INTO {self.table}
@@ -137,7 +160,7 @@ class VectorStore:
         if not children:
             return []
         child_ids = [c.chunk_id for c in children]
-        with self.conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.execute(f"""
                 SELECT chunk_id, parent_chunk_id
                 FROM {self.table}
@@ -165,7 +188,7 @@ class VectorStore:
 
         parent_map: dict[str, ChunkWindow] = {}
         if seen_parent_ids:
-            with self.conn.cursor() as cur:
+            with self._cursor() as cur:
                 cur.execute(f"""
                     SELECT chunk_id, doc_id, text, start_pos, end_pos
                     FROM {self.table}
@@ -183,7 +206,7 @@ class VectorStore:
         return result
 
     def add_doc_meta(self, doc_id: str, meta: dict) -> None:
-        with self.conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.execute("""
                 INSERT INTO doc_meta
                     (doc_id, contract_type, party_a, party_b, effective_date,
@@ -211,7 +234,7 @@ class VectorStore:
         self.conn.commit()
 
     def get_doc_meta(self, doc_id: str) -> dict | None:
-        with self.conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.execute("""
                 SELECT contract_type, party_a, party_b, effective_date,
                        governing_law, key_clauses, raw_json
@@ -231,7 +254,7 @@ class VectorStore:
                       children_only: bool = False) -> list[ChunkWindow]:
         vec = np.array(query_vec)
         child_filter = "AND parent_chunk_id IS NOT NULL" if children_only else ""
-        with self.conn.cursor() as cur:
+        with self._cursor() as cur:
             # 距离进 SELECT 列表并按别名排序：ORDER BY 引用输出别名时 Postgres 会
             # 解析回原表达式，pgvector 索引照常命中，但分数拿得到了。
             if doc_id is not None:
@@ -261,7 +284,7 @@ class VectorStore:
                     doc_id: str | None = None,
                     children_only: bool = False) -> list[ChunkWindow]:
         child_filter = "AND parent_chunk_id IS NOT NULL" if children_only else ""
-        with self.conn.cursor() as cur:
+        with self._cursor() as cur:
             cur.execute("SELECT replace(plainto_tsquery('english', %s)::text, ' & ', ' | ')", (query,))
             tsq_or = cur.fetchone()[0]
             if not tsq_or:

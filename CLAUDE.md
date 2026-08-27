@@ -31,6 +31,12 @@ uv run scripts/grid_search.py --reranker
 uv run scripts/ab_sufficiency.py --limit 200 --concurrency 4
 uv run scripts/ab_sufficiency.py --compare data/runs/ab_judge/<ts>.json
 
+# 三组 trace 语料（规格 2.6，contract scope；结果写入 data/runs/traces/）
+uv run scripts/build_trace_corpus.py --limit 0 --concurrency 4
+uv run scripts/build_trace_corpus.py --limit 200 --only baseline fixed   # 只跑部分组
+# judge 判断 vs CUAD gold span 的逐轮 2×2 表（纯离线，不碰 DB / LLM）
+uv run scripts/gold_round_check.py "data/runs/traces/<ts>_*.jsonl"
+
 # 生成层评估（结果写入 data/runs/gen_eval/<ts>.json）
 uv run scripts/eval_generation.py --limit 200 --reranker --sim-threshold 0.70
 uv run scripts/eval_generation.py --limit 200 --reranker --sim-threshold 0.70 --ragas --ragas-limit 30
@@ -144,7 +150,7 @@ question → embeddings.py → store.py（vector / bm25 / hybrid RRF）
 ### 核心模块
 
 - **`pipeline.py`** — 唯一的对外入口，封装 ingest + query 两条路径，组合上面所有模块
-- **`store.py`** — 动态表名（`VectorStore(dsn, table="chunks")`），`_init_schema()` 自动建表建索引；BM25 用 PostgreSQL `tsvector`，通过 OR 语义修复了 CUAD 模板问题（见 `docs/bug_fixes.md`）；`ingest_meta` 表记录每张 chunk 表的实际 ingest 参数，`eval.py` 从此读取
+- **`store.py`** — 所有游标走 `_cursor()`，**出错必回滚**：psycopg 在事务中出错后该连接上的后续语句一律报 `InFailedSqlTransaction` 直到显式 rollback，不回滚会让一次瞬时错误**永久**报废连接。`serve.py` 是长驻进程，症状会是"从此所有查询都失败"而不是"那一次失败"（实测 1 次死锁连锁出 15 条 InFailedSqlTransaction）。并发构造 `VectorStore` 会因 `_init_schema()` 的 DDL 互相死锁——多线程时要**串行**建好连接再起线程，或传 `init_schema=False`。动态表名（`VectorStore(dsn, table="chunks")`），`_init_schema()` 自动建表建索引；BM25 用 PostgreSQL `tsvector`，通过 OR 语义修复了 CUAD 模板问题（见 `docs/bug_fixes.md`）；`ingest_meta` 表记录每张 chunk 表的实际 ingest 参数，`eval.py` 从此读取
 - **`config.py`** — 所有 dataclass 配置，`load_config()` 从 config.yaml + .env 加载；各脚本用 `dataclasses.replace()` 在运行时覆盖字段，不改文件
 - **`llm.py`** — `ChatClient`，所有 LLM 调用的唯一入口（OpenAI 兼容 `/chat/completions`）。换服务商只改 `config.yaml` 的 `contextual.base_url` / `contextual.model`，调用方不动
 - **`contextualizer.py`** — 五个类都用 `ChatClient.from_config(cfg, max_retries=0)`：各类自带重试循环，不覆盖会变成 (n+1)² 次请求；结果缓存在 `.cache/contextual.json`，key = `chunk_id:text_hash`
@@ -267,8 +273,14 @@ eval_ocr.py（本地，按 --batch-size 成批）
 > chunk，17/25 的 chunk 总数 ≤ `fetch_k=60`——候选池就是整份合同，换策略不改变
 > reranker 的输入。实测 hybrid / vector / hyde 三者返回 top-10 的重合度 0.97~0.99，
 > 五个动作实际塌缩成两个（hybrid 系 与 bm25）；corpus scope 下才拉得开
-> （bm25 vs vector 降到 0.333）。**规格 2.6 的三组对照应以 corpus scope 为主**，
-> 否则测的是一个没有决策空间的决策层。见 `docs/experiments.md`。
+> （bm25 vs vector 降到 0.333）。
+>
+> 但**不要因此换到 corpus scope**：那边 CUAD 的问题不标识文档，任务不可解。
+> 1000 条样本只有 41 个不同的问题文本，每条原样出现在 24~25 份合同里，查询里没有
+> 信息能指出该找哪一份。实测 20 条 pilot：corpus 下 gold span 只在 1 轮里出现过，
+> contract 下是 16 轮。**评测与语料产出一律用 contract scope**，`--corpus` 只用于
+> 复现这个对照。策略空间小是要如实记录的性质，不是换 scope 的理由——换到一个自变量
+> 能动但因变量无意义的设定更糟。见 `docs/experiments.md`。
 
 **检索层**（律所/法务场景，hit@1 和 mrr@5 为核心指标）。
 Run: `20260824T230237Z`，1000 条 CUAD QA：
@@ -325,6 +337,29 @@ Run: `20260824T230237Z`，1000 条 CUAD QA：
 >
 > 迁移过程中的失败定位（GLM 拒答门塌陷、thinking 的双向效应、json_schema 无效）
 > 见 `docs/experiments.md`。
+
+### Agentic 循环的实测结论（2026-08-27，1000 条 × 3 组，contract scope）
+
+`data/runs/traces/20260827T015344Z_*.jsonl`。三组对照的结果是**负结果**，写在这里
+免得后来者重跑一遍：
+
+| 组 | accuracy | 白烧率 | 提前停止率 | 平均轮数 | J |
+|----|----------|--------|-----------|---------|---|
+| baseline（LLM 选策略） | 0.469 | 0.624 | 0.026 | 1.46 | 0.668 |
+| **fixed（固定阶梯，无 LLM 决策）** | 0.478 | 0.623 | 0.037 | 1.43 | 0.660 |
+| no_rerank | 0.473 | 0.663 | 0.051 | 1.45 | 0.663 |
+
+- **LLM 策略选择器无可测收益**：与"不让系统自己选"的 fixed 组差 0.009。选择器确实
+  在做不同选择（bm25 264 / hyde 169 / 重选 21），只是选什么都一样。
+  ⚠️ 混淆因素：contract scope 下候选池就是整份合同，五个动作塌缩成两个——"选择器
+  没用"与"这个 scope 下没得选"在本轮数据里分不开。
+- **多轮成本收益比极差**：281 条有答案样本，多跑 218 轮只换回 7 条"第 0 轮没拿到、
+  后来拿到了"（约 31 轮救回 1 条）。检索在第一轮就见顶。
+- **判定器极度保守**：白烧 0.624 / 提前停止 0.026，与 #24 在 200 条上的形态一致。
+  方向是安全的那一侧（白烧只多花钱，提前停止直接产出错答案），但 62% 的白烧率是
+  当前循环唯一的成本来源，**下一步最该动的是判定器，不是选择器**。
+
+详见 `docs/experiments.md`。
 
 ## 关键约束
 
