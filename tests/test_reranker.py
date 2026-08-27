@@ -2,9 +2,12 @@
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+import requests
+
 from lex_rag.chunking import ChunkWindow
 from lex_rag.config import RerankConfig
-from lex_rag.reranker import RerankClient
+from lex_rag.reranker import RerankClient, _backoff_sec
 
 
 def _cfg(batch_size: int = 32) -> RerankConfig:
@@ -144,3 +147,75 @@ def test_truncated_results_warn_and_default_to_zero():
         scores = client._score_batch("query", ["a", "b", "c"])
 
     assert scores == [0.0, 0.9, 0.0]
+
+
+# ── 重试策略：窗口宽度与去同步 ──────────────────────────────────
+# 这两条不是纸面偏好，是 1000 条语料量出来的：失败的 retrieval step 耗时中位
+# 8.45s（固定 1.0s backoff 撑不过服务端 8.5 秒的抖动），且有两条查询在相隔
+# 0.019s 内同时耗尽重试（4 个 worker 锁步）。见 docs/experiments.md。
+
+def test_backoff_grows_exponentially():
+    """固定退避的重试窗口太窄，服务端抖动超过 8.5s 就整条失败。"""
+    lows = [1.0 * (2 ** i) * 0.5 for i in range(4)]
+    assert lows == [0.5, 1.0, 2.0, 4.0]      # 下界逐次翻倍，否则不是指数退避
+    for i in range(4):
+        samples = [_backoff_sec(1.0, i) for _ in range(200)]
+        assert min(samples) >= lows[i]
+        assert max(samples) < 1.0 * (2 ** i) * 1.5
+
+
+def test_backoff_is_jittered_so_workers_do_not_retry_in_lockstep():
+    """没有抖动时多个 worker 会同步重试，把一次降级放大成一片失败。"""
+    samples = {_backoff_sec(1.0, 2) for _ in range(200)}
+    assert len(samples) > 190          # 几乎全不相同
+
+
+def test_retry_window_covers_the_observed_outage_length():
+    """4 次重试的睡眠总时长下界必须超过实测的 8.45s 失败窗口。"""
+    worst_case_floor = sum(1.0 * (2 ** i) * 0.5 for i in range(4))
+    assert worst_case_floor >= 7.5     # 0.5+1+2+4 = 7.5s，加上请求耗时已远超 8.45s
+
+
+def test_failure_message_carries_the_server_response_body():
+    """原来只抛 "failed after N retries"，排查时只剩这一句废话。"""
+    client = RerankClient(_cloud_cfg())
+    resp = MagicMock()
+    resp.status_code = 429
+    resp.text = "{\"code\":50505,\"message\":\"rate limit exceeded\"}"
+    err = requests.HTTPError("429 Client Error")
+    err.response = resp
+
+    with patch("lex_rag.reranker.requests.post") as mock_post:
+        mock_post.return_value.raise_for_status.side_effect = err
+        with pytest.raises(RuntimeError) as ei:
+            client._score_batch("query", ["a", "b"])
+
+    msg = str(ei.value)
+    assert "429" in msg and "rate limit exceeded" in msg
+    assert "2 docs" in msg               # 出错时的 payload 规模也要留下
+
+
+def test_non_http_failure_still_names_the_exception_type():
+    client = RerankClient(_cloud_cfg())
+    with patch("lex_rag.reranker.requests.post",
+               side_effect=requests.ConnectionError("connection reset")):
+        with pytest.raises(RuntimeError) as ei:
+            client._score_batch("query", ["a"])
+    assert "ConnectionError" in str(ei.value)
+    assert "connection reset" in str(ei.value)
+
+
+def test_each_retry_is_announced_on_stderr(capsys):
+    """静默重试会让"没故障"和"故障被重试盖住"变成同一种观测结果。"""
+    cfg = _cloud_cfg()
+    cfg = RerankConfig(**{**cfg.__dict__, "max_retries": 2, "retry_backoff_sec": 0.0})
+    client = RerankClient(cfg)
+
+    with patch("lex_rag.reranker.requests.post",
+               side_effect=requests.ConnectionError("boom")):
+        with pytest.raises(RuntimeError):
+            client._score_batch("query", ["a"])
+
+    err = capsys.readouterr().err
+    assert err.count("[rerank]") == 2          # 最后一次失败不再重试，所以不出声
+    assert "boom" in err
