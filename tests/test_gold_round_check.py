@@ -16,7 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-from gold_round_check import _gold_in_chunks, _rates, analyse  # noqa: E402
+from gold_round_check import _gold_in_chunks, _rates, _spans_by_id, analyse  # noqa: E402
 
 from lex_rag.trace_sink import TraceSink  # noqa: E402
 
@@ -163,3 +163,34 @@ def test_rounds_without_a_verdict_are_skipped(tmp_path):
 
     res = analyse(tmp_path / "t.jsonl", _spans_by_id(qa))
     assert sum(res["cell"].values()) == 1 and res["skipped"] == 1
+
+
+def test_gold_beyond_top_k_is_not_counted_as_waste(tmp_path):
+    """trace 落盘整个累积池，但 judge 只看前 k 个。
+
+    gold 排在第 11 位时判定器根本没见过它，说"不够"是对的；按整池判会把这种
+    情况算成白烧，冤枉判定器。见 agent.py 的 `judge(question, pool[:k])`。
+    """
+    qa = tmp_path / "qa.jsonl"
+    qa.write_text(json.dumps({
+        "id": "q1", "doc_id": "d", "question": "?",
+        "spans": [{"start": 500, "end": 510}],
+    }, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    # 前 2 条不含 gold，第 3 条含——k=2 时判定器看不到它
+    chunks = [{"chunk_id": "c1", "doc_id": "d", "start": 0, "end": 100},
+              {"chunk_id": "c2", "doc_id": "d", "start": 100, "end": 200},
+              {"chunk_id": "c3", "doc_id": "d", "start": 450, "end": 600}]
+    trace = tmp_path / "t.jsonl"
+    trace.write_text(json.dumps({
+        "trace_id": "t1", "question": "?", "doc_id": "d",
+        "meta": {"id": "q1", "k": 2}, "terminated_by": "max_rounds", "n_rounds": 1,
+        "rounds": [{"index": 0, "chunks": chunks,
+                    "verdict": {"sufficient": False, "missing_kind": "exact_term"}}],
+    }, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    res = analyse(trace, _spans_by_id(qa))
+
+    assert res["cell"][(True, False)] == 0      # 不该算白烧
+    assert res["cell"][(False, False)] == 1     # 是"正确继续"
+    assert res["wasted_rounds"] == 0

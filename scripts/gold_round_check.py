@@ -91,12 +91,18 @@ def analyse(path: Path, spans_by_id: dict[str, list[tuple[int, int]]]) -> dict:
         # 的话，别的合同里凑巧落在同一区间的 chunk 会被算成命中——那会抬高"正确
         # 停止"、同时把假阳性藏起来，正好毁掉这张表要测的东西。
         doc_id = t.get("doc_id") or tmeta.get("gold_doc_id")
+        # trace 落盘的是整个累积池，但 judge 和生成层都只看前 k 个
+        # （`agent.py`: judge(question, pool[:k]) / yield pool[:k]）。
+        # 按整池判命中会把"gold 排在第 11 位、judge 根本没看见"算成白烧，
+        # 冤枉判定器。实测这个偏差占白烧的 4%（白烧率 0.414 → 0.404）——
+        # 不大，但口径必须是"判定器实际看到的东西"，否则这张表测的不是它。
+        k = int(tmeta.get("k") or 0) or None
         for r in t.get("rounds", []):
             v = r.get("verdict")
             if not v:
                 skipped += 1
                 continue
-            gold = _gold_in_chunks(r.get("chunks", []), spans, doc_id)
+            gold = _gold_in_chunks(r.get("chunks", [])[:k], spans, doc_id)
             key = (gold, bool(v.get("sufficient")))
             cell[key] += 1
             per_round_cell.setdefault(r.get("index", 0), Counter())[key] += 1
@@ -105,7 +111,7 @@ def analyse(path: Path, spans_by_id: dict[str, list[tuple[int, int]]]) -> dict:
 
         rounds = t.get("rounds") or []
         if rounds and rounds[-1].get("verdict"):
-            gold = _gold_in_chunks(rounds[-1].get("chunks", []), spans, doc_id)
+            gold = _gold_in_chunks(rounds[-1].get("chunks", [])[:k], spans, doc_id)
             final[(gold, t.get("terminated_by"))] += 1
 
     return {

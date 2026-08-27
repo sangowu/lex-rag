@@ -264,13 +264,25 @@ class AgenticPipeline:
         一轮的容量——刚检索到的新片段立刻被扔掉，累积形同虚设（实测平均累积
         chunk 10.2，而第一轮就有 10 个）。截断应该发生在喂给 judge 和生成器的
         时候，而不是发生在池子上。
+
+        ⚠️ **排序和截断是两件事，别用一个 `len(pool) <= cap` 把它们一起跳过。**
+        上一版开头写的是 `if len(pool) <= cap: return pool`。cap 是 30，而
+        contract scope 下 pool 实测最大只有 17——于是这个分支**每次都命中**，
+        reranker 一次都没被调用过，池子就是第 0 轮排好的 10 条后面直接追加后续
+        轮次的新 chunk。新 chunk 永远落在第 11 位往后，而 judge 和调用方只看前
+        k=10 个：**多轮对输出是彻底的空操作**。1000 条语料实测，288 条多轮查询里
+        288 条的最终 top-10 与第 0 轮逐位相同（Jaccard 精确 1.000）。
+
+        精确的 1.000 是空操作的签名，不是弱效应——`docs/experiments.md` 里 HyDE
+        那个 bug 的唯一症状也是这个数。
         """
-        if len(pool) <= cap:
+        if len(pool) <= 1:
             return pool
         try:
             if self.pipeline.cfg.reranker.enabled:
                 return self.pipeline.reranker.rerank(question, pool, top_k=cap)
         except Exception:
+            # 重排失败不该让整轮循环挂掉：退回"按原顺序截断"，与无 reranker 同路。
             pass
         return pool[:cap]
 
@@ -348,7 +360,14 @@ class AgenticPipeline:
                     # 上限是为了压住规格第 3 节的"累积上下文污染"，但它必须大于 k，
                     # 否则累积会被自己截没。
                     cap = max(k * self.max_iterations, k + 10)
-                    pool = self._rank_pool(question, _dedupe(pool, got), cap)
+                    merged = _dedupe(pool, got)
+                    if not pool or len(merged) == len(pool):
+                        # 第 0 轮的 got 已经被检索层排好序；这一轮没捞到新片段时
+                        # 同理。两种情况重排都是同样的输入同样的输出，只白花一次
+                        # API 往返。
+                        pool = merged
+                    else:
+                        pool = self._rank_pool(question, merged, cap)
                     if rt is not None:
                         rt.chunks(pool)
 
