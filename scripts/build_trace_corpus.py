@@ -174,10 +174,15 @@ def run_one_config(spec: dict, items, args, ts: str, shared_cache: dict) -> Path
         try:
             # meta 里带 gold 标签，让语料自包含：下游 tracelens 与
             # gold_round_check 不必再回头 join qa 文件。
-            _agent().query(item.question, doc_id=doc_id, k=args.top_k,
-                           meta={"id": item.id, "has_answer": item.has_answer,
-                                 "gold_doc_id": item.doc_id,
-                                 "n_gold_spans": len(item.spans)})
+            _, trace = _agent().query(
+                item.question, doc_id=doc_id, k=args.top_k,
+                meta={"id": item.id, "has_answer": item.has_answer,
+                      "gold_doc_id": item.doc_id, "n_gold_spans": len(item.spans)})
+            # 循环内部会把检索/判定的异常接住并记成 terminated_by=error，不会抛到
+            # 这里。只统计抛出来的那些，就会报出"失败 0"而语料里其实有几十条 error
+            # ——上一轮全量正是这样（报 0，实际 baseline 14 条、fixed 44 条）。
+            if trace and trace[-1] == "terminated_by=error":
+                return "loop_error（详见 trace 内的 step.error）"
             return None
         except Exception as e:               # noqa: BLE001 — 一条失败不该毁掉整组
             return f"{type(e).__name__}: {e}"
