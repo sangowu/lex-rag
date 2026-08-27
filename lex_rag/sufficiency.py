@@ -19,6 +19,14 @@ A/B 还能复跑（删了实验就不可复现），**不要接进生成层**。
 **`missing_kind` 是枚举而不是自由文本**，因为它的读者是代码不是人。让选择器
 去正则匹配一句英文描述，等于把决策质量押在措辞上；自由文本仍然保留在
 `missing` 字段里，供 trace 和人工复盘用。
+
+**prompt 按 KIND A / KIND B 分流**，理由与 `generator.py` 完全相同，而且是同一个
+坑踩了第二次。初版写的是 "sufficient only if the text that answers it is literally
+present"，判定器于是去找一个**标着**该概念的条款：合同标题在上下文里却报
+"do not contain the contract's title or document name"，签名块在上下文里却报
+"do not explicitly define or list all 'Parties'"。1000 条语料实测，事实抽取类
+问题的白烧率 0.75、条款存在性类 0.41——差距全在这。生成层 v5 用同一个分流把
+误拒从 0.120 降到 0.060，判定器当初没拿到这份修复。见 `docs/experiments.md`。
 """
 from __future__ import annotations
 
@@ -93,10 +101,38 @@ Question: {question}
 Contract excerpts:
 {context}
 
+Questions come in two kinds. Apply the matching rule when deciding "sufficient".
+
+KIND A — "does this contract contain a <type of provision>?"
+(non-compete, non-disparagement, termination for convenience, exclusivity, ROFR, ...)
+Sufficient only if an excerpt contains such a provision, or explicitly states the negative.
+A related-but-different clause is NOT sufficient.
+
+KIND B — factual extraction: the contract's name, the parties, dates, term length, renewal
+period, expiration, notice periods, durations, amounts, governing law.
+These are stated somewhere in almost every contract, and they are rarely written under a
+heading that repeats the question's wording. Judge the fact, not the label:
+- A fact stated relatively is sufficient. "The term shall be ten (10) years from the Effective
+  Date" IS sufficient for a question about expiration — no clause labelled "Expiration Date"
+  is required, and no calendar date has to appear.
+- The title line at the top of a contract IS its document name, even a generic one
+  ("SUPPLY CONTRACT", "AGREEMENT"). Do not reject it for being unspecific.
+- The opening paragraph or the signature blocks naming the signatories ARE the parties.
+- Do NOT require a clause explicitly labelled with the concept the question names.
+  Mark KIND B insufficient only when no excerpt addresses the fact at all.
+
+For both kinds, "insufficient" must mean **more excerpts from this contract would help**.
+The two kinds exit differently when more excerpts would NOT help:
+- KIND A — the excerpts cover the relevant part of the contract and the provision is still
+  absent: that is "out_of_scope": true, NOT "sufficient". Never call it sufficient.
+- KIND B — the contract states the fact only loosely (a term given as a duration, a date left
+  blank, a figure redacted): that IS the contract's answer. Mark it "sufficient" and stop;
+  do not keep retrieving for a precision the contract never had.
+
 Decide three things:
 
 1. "sufficient" — can the question be answered using ONLY these excerpts, quoting them
-   verbatim? True only if the text that answers it is literally present.
+   verbatim, under the matching rule above?
 2. "out_of_scope" — is this a question about a provision that this contract simply does not
    contain? Distinguish carefully from (1): "the excerpts do not include it" means insufficient
    context, while "this contract has no such provision at all" means out of scope. Set true only
@@ -226,10 +262,26 @@ class SufficiencyJudge:
         return self.mode == "unified"
 
     def _context(self, chunks: list[ChunkWindow]) -> str:
-        parts = [f"[{i}] {c.text}" for i, c in enumerate(chunks, 1)]
-        text = "\n\n".join(parts)
-        # 截断是为了控成本；从尾部截掉，靠前的是 reranker 认为最相关的。
-        return text[: self.max_context_chars]
+        """拼上下文，超预算时**按 chunk 边界**从尾部丢，不切半句。
+
+        靠前的是 reranker 认为最相关的，所以丢尾部是对的；但不能按字符切——
+        切出来的半句话会让判定器报 `clause_context`（"相关条款在，但被截断了"），
+        而那个截断是我们自己造的，不是检索的问题。误判的代价是照着这个 hint
+        换成 parent 策略再跑一轮，白烧。
+
+        第一条永远保留：预算比单条 chunk 还小时，宁可超一点也不能给空上下文。
+        """
+        out: list[str] = []
+        total = 0
+        for i, c in enumerate(chunks, 1):
+            piece = f"[{i}] {c.text}"
+            # +2 是 chunk 之间的 "\n\n"
+            cost = len(piece) + (2 if out else 0)
+            if out and total + cost > self.max_context_chars:
+                break
+            out.append(piece)
+            total += cost
+        return "\n\n".join(out)
 
     def _prompt(self, question: str, chunks: list[ChunkWindow],
                 draft_answer: str | None) -> tuple[str, dict]:

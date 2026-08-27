@@ -109,6 +109,33 @@ def test_unknown_mode_is_rejected_at_construction():
         SufficiencyJudge(_cfg(), mode="whatever")
 
 
+# ── 上下文拼装：超预算按 chunk 边界丢 ─────────────────────────────
+
+def test_context_drops_whole_chunks_instead_of_cutting_mid_sentence():
+    """半句话会被判定器读成"条款被截断了"，而那个截断是我们自己造的。"""
+    j = _judge()
+    j.max_context_chars = 40
+    ctx = j._context([ChunkWindow(chunk_id=f"d#{i}", doc_id="d", text="x" * 30,
+                                  start=0, end=30) for i in range(5)])
+    assert ctx.count("x") % 30 == 0          # 没有半条 chunk
+    assert len(ctx) <= 40
+
+
+def test_context_always_keeps_the_first_chunk_even_when_over_budget():
+    """预算比单条 chunk 还小时，宁可超一点也不能给判定器空上下文。"""
+    j = _judge()
+    j.max_context_chars = 5
+    ctx = j._context(_chunks(3))
+    assert ctx.startswith("[1] clause 0")
+    assert "clause 1" not in ctx
+
+
+def test_context_keeps_every_chunk_when_it_fits():
+    j = _judge()
+    ctx = j._context(_chunks(3))
+    assert [f"[{i}]" in ctx for i in (1, 2, 3)] == [True] * 3
+
+
 # ── VerifiedGenerator：两段式的翻转规则 ───────────────────────────
 
 def _vgen(draft_refused: bool, verdict_fields: dict,
