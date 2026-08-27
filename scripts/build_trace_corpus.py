@@ -223,7 +223,9 @@ def main() -> None:
                     help="corpus 下 CUAD 的问题不标识文档，任务不可解；见模块 docstring")
     ap.add_argument("--concurrency", type=int, default=4,
                     help="上限由配额决定（约 120 rpm ÷ 4 次调用/条），加大只会换来 429")
-    ap.add_argument("--max-iterations", type=int, default=3)
+    # 默认与 AgenticPipeline 对齐（2）：第 2 轮从未救回过任何一条，
+    # 见 docs/experiments.md。要复现旧语料就显式传 --max-iterations 3。
+    ap.add_argument("--max-iterations", type=int, default=2)
     ap.add_argument("--top-k", type=int, default=10)
     ap.add_argument("--select-first-round", action="store_true",
                     help="首轮也调选择器（默认首轮用默认策略）")

@@ -351,3 +351,23 @@ def test_rerank_failure_falls_back_to_plain_truncation():
 
     assert [c.chunk_id for c in chunks] == ["a", "b", "c"]
     assert trace[-1] == "terminated_by=sufficient"
+
+
+def test_default_max_iterations_is_two():
+    """第 2 轮从未救回过任何一条（两轮 1000 条语料一致），却贡献 33~38 次白烧。
+
+    默认值是行为约定，改它要有语料支持——钉在这里免得被顺手改回去。
+    见 docs/experiments.md「白烧率怎么控制」。
+    """
+    a = AgenticPipeline(_pipeline(), _cfg(), judge=MagicMock(), selector=MagicMock())
+    assert a.max_iterations == 2
+
+
+def test_loop_stops_after_two_rounds_by_default():
+    p = _pipeline([_chunks(["a"]), _chunks(["b"]), _chunks(["c"])])
+    a = _agent(p, [Verdict(sufficient=False), Verdict(sufficient=False)],
+               actions=[("bm25", RetrievalStrategy(mode="bm25"))])
+    _, trace = a.query("q")
+
+    assert p._query_impl.call_count == 2
+    assert trace[-1] == "terminated_by=max_rounds"

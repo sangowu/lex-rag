@@ -231,7 +231,12 @@ class AgenticPipeline:
         self,
         pipeline: RAGPipeline,
         cfg: ContextualConfig,
-        max_iterations: int = 3,
+        # 2 而不是 3：两轮 1000 条语料一致显示 gold 首次进入 top-k 只发生在
+        # 第 0 轮（242/243）或第 1 轮（4/3），**第 2 轮一条都没救回过**。
+        # 但当时有约 200 条查询会跑到第 2 轮，白白多花 200 个轮次、白烧 33~38 次、
+        # 把延迟从 10.3s 拖到 16.6s。离线推演：白烧率 0.41 → 0.33，额外轮数 −42%，
+        # 救回损失 0。见 docs/experiments.md。
+        max_iterations: int = 2,
         *,
         sink: Any = None,
         select_first_round: bool = False,
