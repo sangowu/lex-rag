@@ -279,15 +279,24 @@ def run_eval(args) -> None:
     per_item_rows: list[dict] = []
     sim_data: list[dict] = []   # 供循环后批量计算语义相似度
 
+    # generate_k 只能从检索回来的东西里切，所以 top_k 必须先够大。
+    # 此前这里写死用 cfg.retrieval.top_k（=10），于是 `--generate-k 20` 是个
+    # 空操作——切 20 条却只有 10 条可切。要测"多给上下文"就必须两个一起动。
+    top_k = args.top_k or max(cfg.retrieval.top_k, args.generate_k)
+    # generate_k 缺省跟随 top_k：把"给生成层少一点"当默认曾是个未验证的假设，
+    # 配对实测（gold 在前 8 名的 30 条对照组，8 条 vs 20 条上下文）是 1 赚 1 亏，
+    # 多给干扰项没有可测的伤害。要复现旧行为显式传 `--generate-k 8`。
+    generate_k = args.generate_k or top_k
+
     from tqdm import tqdm
     for item in tqdm(qa_items, desc="gen-eval", unit="q"):
         # Step 1: 检索（--corpus 模式不按 doc_id 过滤）
         query_doc_id = None if args.corpus else item.doc_id
-        chunks = pipeline.query(item.question, k=cfg.retrieval.top_k, doc_id=query_doc_id)
+        chunks = pipeline.query(item.question, k=top_k, doc_id=query_doc_id)
         metas = pipeline.get_doc_metas_for_chunks(chunks)
 
         # Step 2: 生成（单文档传 meta=，多文档传 metas=）
-        gen_chunks = chunks[:args.generate_k]
+        gen_chunks = chunks[:generate_k]
         if args.corpus:
             result = generator.generate(item.question, gen_chunks, metas=metas or None)
         else:
@@ -394,7 +403,8 @@ def run_eval(args) -> None:
         "reranker_enabled": cfg.reranker.enabled,
         "table": cfg.database.table,
         "limit": args.limit,
-        "generate_k": args.generate_k,
+        "generate_k": generate_k,
+        "top_k": top_k,
         "sim_threshold": args.sim_threshold,
         "corpus_mode": args.corpus,
         "git_commit": _git_commit(),
@@ -514,7 +524,8 @@ def parse_args():
     p.add_argument("--ragas",          action="store_true", help="同时运行 RAGAS 评估（需安装 ragas）")
     p.add_argument("--ragas-limit",    type=int, default=20, help="RAGAS 评估样本数，默认 20")
     p.add_argument("--sim-threshold",  type=float, default=0.75, help="语义相似度命中阈值，默认 0.75")
-    p.add_argument("--generate-k",     type=int,   default=8,    help="喂给生成模型的 chunk 数，默认 8（<= top_k）")
+    p.add_argument("--generate-k",     type=int,   default=0,    help="喂给生成模型的 chunk 数；0 = 跟随 top_k")
+    p.add_argument("--top-k",          type=int,   default=0,    help="检索返回条数，覆盖 config.yaml；0 = max(config, generate_k)")
     p.add_argument("--corpus",         action="store_true",      help="不按 doc_id 过滤，全库 corpus 检索")
     p.add_argument("--compare", nargs=2, metavar=("A", "B"), help="对比两个 gen_eval 结果文件，不运行新评估")
     return p.parse_args()

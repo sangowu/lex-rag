@@ -39,13 +39,32 @@ app = FastAPI(title="Legal RAG API", version="1.0.0")
 # 请求 / 响应模型
 # ---------------------------------------------------------------------------
 
+def _default_top_k() -> int:
+    """默认检索条数取自 config.yaml，不在这里写死。
+
+    这里原本硬编码 top_k=10 / generate_k=8。config.yaml 把 top_k 提到 20 之后，
+    API 仍会按 10 检索——两处默认值一旦分家就静默漂移，而且只有跑评测才发现。
+    """
+    return get_pipeline().cfg.retrieval.top_k
+
+
 class QueryRequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=2000)
     doc_id: str | None = Field(None, description="指定合同 ID；为 None 时进行 corpus 全库检索")
-    top_k: int = Field(10, ge=1, le=50)
-    generate_k: int = Field(8, ge=1, le=50)
+    top_k: int = Field(0, ge=0, le=50, description="0 = 用 config.yaml 的 retrieval.top_k")
+    generate_k: int = Field(
+        0, ge=0, le=50,
+        description="喂给生成层的片段数；0 = 跟随 top_k。"
+                    "配对实测表明多给上下文没有可测的伤害，默认不再单独收窄。",
+    )
     stream: bool = Field(False, description="是否流式返回答案（SSE）")
     agentic: bool = Field(False, description="是否启用 Agentic 迭代检索")
+
+    def resolved_top_k(self) -> int:
+        return self.top_k or _default_top_k()
+
+    def resolved_generate_k(self) -> int:
+        return self.generate_k or self.resolved_top_k()
 
 
 class CitationOut(BaseModel):
@@ -83,14 +102,15 @@ def _run_query(req: QueryRequest) -> QueryResponse:
 def _run_query_impl(req: QueryRequest) -> QueryResponse:
     pipeline = get_pipeline()
     generator = get_generator()
+    top_k = req.resolved_top_k()
 
     if req.agentic:
         from lex_rag.agent import AgenticPipeline
         from lex_rag.config import load_config
         agent = AgenticPipeline(pipeline, load_config().contextual)
-        chunks, query_trace = agent.query(req.question, doc_id=req.doc_id, k=req.top_k)
+        chunks, query_trace = agent.query(req.question, doc_id=req.doc_id, k=top_k)
     else:
-        chunks = pipeline.query(req.question, k=req.top_k, doc_id=req.doc_id)
+        chunks = pipeline.query(req.question, k=top_k, doc_id=req.doc_id)
         query_trace = [req.question]
 
     if not chunks:
@@ -100,7 +120,7 @@ def _run_query_impl(req: QueryRequest) -> QueryResponse:
         )
 
     metas = pipeline.get_doc_metas_for_chunks(chunks)
-    gen_chunks = chunks[:req.generate_k]
+    gen_chunks = chunks[:req.resolved_generate_k()]
     is_corpus = req.doc_id is None
 
     result = generator.generate(
@@ -139,6 +159,7 @@ async def _stream_query_impl(req: QueryRequest):
     loop = asyncio.get_event_loop()
     pipeline = get_pipeline()
     generator = get_generator()
+    top_k = req.resolved_top_k()
 
     # 检索跑在 executor 线程；copy_context 把当前父 span 上下文带过去，保证 trace 正确嵌套
     ctx = contextvars.copy_context()
@@ -148,11 +169,11 @@ async def _stream_query_impl(req: QueryRequest):
         from lex_rag.config import load_config
         agent = AgenticPipeline(pipeline, load_config().contextual)
         chunks, query_trace = await loop.run_in_executor(
-            None, lambda: ctx.run(agent.query, req.question, doc_id=req.doc_id, k=req.top_k)
+            None, lambda: ctx.run(agent.query, req.question, doc_id=req.doc_id, k=top_k)
         )
     else:
         chunks = await loop.run_in_executor(
-            None, lambda: ctx.run(pipeline.query, req.question, k=req.top_k, doc_id=req.doc_id)
+            None, lambda: ctx.run(pipeline.query, req.question, k=top_k, doc_id=req.doc_id)
         )
         query_trace = [req.question]
 
@@ -164,7 +185,7 @@ async def _stream_query_impl(req: QueryRequest):
         return
 
     metas = pipeline.get_doc_metas_for_chunks(chunks)
-    gen_chunks = chunks[:req.generate_k]
+    gen_chunks = chunks[:req.resolved_generate_k()]
     is_corpus = req.doc_id is None
 
     final_result = None
@@ -289,7 +310,7 @@ def _ui_query_impl(
         return
 
     metas = pipeline.get_doc_metas_for_chunks(chunks)
-    gen_chunks = chunks[:generate_k]
+    gen_chunks = chunks[:generate_k or top_k]   # 0 = 跟随 top_k
 
     accumulated = ""
     final_result: GenerationResult | None = None
@@ -369,8 +390,14 @@ def build_ui():
                     label="合同范围", info="选择单份合同或在全库中检索",
                 )
                 with gr.Accordion("高级参数", open=False):
-                    top_k_slider = gr.Slider(1, 20, value=10, step=1, label="检索 top_k")
-                    generate_k_slider = gr.Slider(1, 20, value=8, step=1, label="生成 generate_k")
+                    top_k_slider = gr.Slider(
+                        1, 30, value=_default_top_k(), step=1, label="检索 top_k",
+                        info="默认值来自 config.yaml，不在代码里写死",
+                    )
+                    generate_k_slider = gr.Slider(
+                        0, 30, value=0, step=1, label="生成 generate_k",
+                        info="喂给生成层的片段数，0 = 跟随 top_k",
+                    )
                     agentic_toggle = gr.Checkbox(
                         value=False, label="Agentic 迭代检索",
                         info="无结果时自动重写查询并重试（最多 2 次）",

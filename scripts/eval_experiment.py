@@ -149,7 +149,7 @@ def build_task(cfg, pipeline: RAGPipeline, generator: LegalGenerator,
         doc_id = None if corpus else data.get("doc_id")
         chunks = pipeline.query(question, k=cfg.retrieval.top_k, doc_id=doc_id)
         metas = pipeline.get_doc_metas_for_chunks(chunks)
-        gen_chunks = chunks[:generate_k]
+        gen_chunks = chunks[:generate_k or cfg.retrieval.top_k]   # 0 = 跟随 top_k
         if corpus:
             result = generator.generate(question, gen_chunks, metas=metas or None)
         else:
@@ -219,7 +219,7 @@ def main() -> None:
     ap.add_argument("--limit", type=int, default=30, help="评估样本上限（0=全部）")
     ap.add_argument("--reranker", action="store_true", help="启用 reranker")
     ap.add_argument("--corpus", action="store_true", help="corpus 模式（不按 doc_id 过滤）")
-    ap.add_argument("--generate-k", type=int, default=8, help="送入生成的 chunk 数")
+    ap.add_argument("--generate-k", type=int, default=0, help="送入生成的 chunk 数；0 = 跟随 config 的 top_k")
     ap.add_argument("--run-name", default=None, help="本次实验 run 名（便于 UI 对比）")
     ap.add_argument("--concurrency", type=int, default=1,
                     help="并发度。默认 1（串行）：RAGPipeline/EmbeddingClient 共享且其 "
