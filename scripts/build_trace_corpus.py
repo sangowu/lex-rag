@@ -226,7 +226,8 @@ def main() -> None:
     # 默认与 AgenticPipeline 对齐（2）：第 2 轮从未救回过任何一条，
     # 见 docs/experiments.md。要复现旧语料就显式传 --max-iterations 3。
     ap.add_argument("--max-iterations", type=int, default=2)
-    ap.add_argument("--top-k", type=int, default=10)
+    ap.add_argument("--top-k", type=int, default=0,
+                    help="0 = 用 config.yaml 的 retrieval.top_k（别再写死，会与配置漂移）")
     ap.add_argument("--select-first-round", action="store_true",
                     help="首轮也调选择器（默认首轮用默认策略）")
     ap.add_argument("--only", nargs="+", metavar="NAME",
@@ -243,6 +244,7 @@ def main() -> None:
     from lex_rag.embeddings import _DEFAULT_CACHE, EmbeddingClient
 
     cfg = load_config()
+    args.top_k = args.top_k or cfg.retrieval.top_k
     items = load_qa(Path(args.qa))
     if args.limit > 0:
         items = items[: args.limit]

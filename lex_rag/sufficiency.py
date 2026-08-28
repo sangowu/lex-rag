@@ -249,7 +249,11 @@ class SufficiencyJudge:
     """
 
     def __init__(self, cfg: ContextualConfig, *, mode: str = "sufficiency",
-                 max_context_chars: int = 12000) -> None:
+                 max_context_chars: int = 24000) -> None:
+        # 24000 ≈ top_k=20 条 chunk 的全量（chunk_chars=1000 + 少量上下文前缀）。
+        # 原值 12000 是 top_k=10 时期定的；top_k 提到 20 之后再留 12000，
+        # 判定器只读得到约一半的片段，却要替生成层判断"够不够"——判的和用的
+        # 不是同一份上下文，`_context()` 那条"按边界丢尾部"的规矩也就白立了。
         if mode not in ("sufficiency", "unified"):
             raise ValueError(f"未知 mode: {mode!r}")
         self.cfg = cfg
