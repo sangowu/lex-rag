@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Iterator
+from dataclasses import dataclass
 from typing import Any
 
 from lex_rag import tracing
@@ -42,6 +43,51 @@ DEFAULT_MODEL = "qwen3.7-flash"
 
 class LLMError(RuntimeError):
     """重试耗尽后仍失败。"""
+
+
+@dataclass(frozen=True)
+class Usage:
+    """一次调用的 token 用量。字段缺失时一律是 0，不是 None。
+
+    用 0 而不是 None 是为了让求和不必到处判空——评测里 usage 缺失和用量为 0 的
+    区别不重要，"能不能直接加起来"才重要。要区分"服务端没给"的场景看 `reported`。
+    """
+
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    # thinking 模型把思考链单独计在 completion_tokens_details.reasoning_tokens 里。
+    # 它**已经包含在** completion_tokens 内，是其中的一部分，不要再加一遍。
+    reasoning_tokens: int = 0
+    reported: bool = False          # 服务端到底给没给 usage
+
+    @property
+    def total_tokens(self) -> int:
+        return self.prompt_tokens + self.completion_tokens
+
+    def __add__(self, other: "Usage") -> "Usage":
+        return Usage(
+            self.prompt_tokens + other.prompt_tokens,
+            self.completion_tokens + other.completion_tokens,
+            self.reasoning_tokens + other.reasoning_tokens,
+            self.reported or other.reported,
+        )
+
+
+def _usage_of(resp: Any) -> Usage:
+    """从 OpenAI 风格响应里安全提取 usage。字段缺失是常态，绝不抛。"""
+    usage = getattr(resp, "usage", None)
+    if usage is None:
+        return Usage()
+    def _int(obj: Any, name: str) -> int:
+        v = getattr(obj, name, None)
+        return int(v) if isinstance(v, (int, float)) else 0
+    details = getattr(usage, "completion_tokens_details", None)
+    return Usage(
+        prompt_tokens=_int(usage, "prompt_tokens"),
+        completion_tokens=_int(usage, "completion_tokens"),
+        reasoning_tokens=_int(details, "reasoning_tokens") if details is not None else 0,
+        reported=True,
+    )
 
 
 class ChatClient:
@@ -164,15 +210,20 @@ class ChatClient:
             }}
         return {"response_format": {"type": "json_object"}}
 
-    def complete(
+    def complete_with_usage(
         self,
         prompt: str,
         *,
         json_mode: bool = False,
         schema: dict | None = None,
         trace_name: str = "llm.generate",
-    ) -> str:
-        """一次补全，返回文本。重试耗尽后抛 LLMError。"""
+    ) -> tuple[str, Usage]:
+        """一次补全，返回 (文本, token 用量)。重试耗尽后抛 LLMError。
+
+        usage 一直都取到了，但此前只喂给 Langfuse——没配 key 时 tracing 是 no-op，
+        于是本地评测**完全看不到 token**。关掉 thinking 那次改动的收益里，
+        "省了多少钱"就因此报不出来，只能靠延迟去猜。所以把它一路带回调用方。
+        """
         gen = tracing.start_generation(trace_name, self.model, prompt)
         last_error: Exception | None = None
         for attempt in range(self.max_retries + 1):
@@ -186,13 +237,34 @@ class ChatClient:
                 text = (resp.choices[0].message.content or "").strip()
                 in_tok, out_tok = tracing.chat_usage(resp)
                 tracing.end_generation(gen, output=text, input_tokens=in_tok, output_tokens=out_tok)
-                return text
+                return text, _usage_of(resp)
             except Exception as e:
                 last_error = e
                 if attempt < self.max_retries:
                     time.sleep(self._backoff_sec(e, attempt))
         tracing.end_generation(gen, output="<error>")
         raise LLMError(f"{self.model} 调用重试 {self.max_retries} 次后仍失败：{last_error}") from last_error
+
+    def complete(
+        self,
+        prompt: str,
+        *,
+        json_mode: bool = False,
+        schema: dict | None = None,
+        trace_name: str = "llm.generate",
+    ) -> str:
+        """一次补全，返回文本。重试耗尽后抛 LLMError。"""
+        return self.complete_with_usage(
+            prompt, json_mode=json_mode, schema=schema, trace_name=trace_name
+        )[0]
+
+    def complete_json_with_usage(self, prompt: str, *, schema: dict | None = None,
+                                 trace_name: str = "llm.generate") -> tuple[dict, Usage]:
+        """JSON mode 补全，附带 token 用量。解析规则同 `complete_json`。"""
+        text, usage = self.complete_with_usage(
+            prompt, json_mode=True, schema=schema, trace_name=trace_name
+        )
+        return _loads_or_empty(text), usage
 
     def complete_json(self, prompt: str, *, schema: dict | None = None,
                       trace_name: str = "llm.generate") -> dict:
@@ -201,9 +273,7 @@ class ChatClient:
         不抛异常是有意的：json_object 模式只保证语法合法、不保证字段齐全，
         把"模型少给了个字段"升级成异常会让整批评测中断，得不偿失。
         """
-        return _loads_or_empty(
-            self.complete(prompt, json_mode=True, schema=schema, trace_name=trace_name)
-        )
+        return self.complete_json_with_usage(prompt, schema=schema, trace_name=trace_name)[0]
 
     # ── 流式 ────────────────────────────────────────────────────
 

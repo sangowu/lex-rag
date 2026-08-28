@@ -223,6 +223,30 @@ def _prompt_fingerprint() -> str:
     return hashlib.sha256(blob).hexdigest()[:12]
 
 
+def _usage_metrics(rows: list[dict]) -> dict:
+    """token 用量的汇总。
+
+    `usage_reported` 是必须的一格：服务端不返回 usage 时所有计数都是 0，而 0 和
+    "真的没用 token"在数字上分不开。少了这一格，一次静默的服务端变更会表现为
+    "成本降到 0"，看起来还像好消息。
+    """
+    if not rows:
+        return {"avg_prompt_tokens": 0.0, "avg_completion_tokens": 0.0,
+                "avg_reasoning_tokens": 0.0, "total_tokens": 0, "usage_reported": 0.0}
+    n = len(rows)
+    prompt = sum(r.get("prompt_tokens", 0) for r in rows)
+    completion = sum(r.get("completion_tokens", 0) for r in rows)
+    reasoning = sum(r.get("reasoning_tokens", 0) for r in rows)
+    reported = sum(1 for r in rows if r.get("prompt_tokens", 0) or r.get("completion_tokens", 0))
+    return {
+        "avg_prompt_tokens": prompt / n,
+        "avg_completion_tokens": completion / n,
+        "avg_reasoning_tokens": reasoning / n,
+        "total_tokens": prompt + completion,
+        "usage_reported": reported / n,
+    }
+
+
 def _git_commit() -> str | None:
     """当前 commit，便于把结果文件对回代码。不在 git 仓库或 git 不可用时返回 None。"""
     import subprocess
@@ -258,6 +282,10 @@ def run_eval(args) -> None:
     cfg = load_config()
     if args.reranker:
         cfg = replace(cfg, reranker=replace(cfg.reranker, enabled=True))
+    # thinking 做 A/B 时必须能从命令行切，不能靠两次运行之间改 config.yaml——
+    # 改文件的做法既不可复现，又容易把别的字段一起带进去，单变量就不成立了。
+    if args.thinking is not None:
+        cfg = replace(cfg, contextual=replace(cfg.contextual, thinking=args.thinking))
     pipeline = RAGPipeline(cfg)
     generator = LegalGenerator(cfg.contextual)
 
@@ -348,6 +376,11 @@ def run_eval(args) -> None:
             **refusal,
             "is_refused": result.is_refused,
             "latency_ms": round(result.latency_ms, 1),
+            # token 用量。延迟能反映 thinking 的代价，但延迟混着网络和排队，
+            # 不能当账单用；要回答"省了多少钱"只能看这三个数。
+            "prompt_tokens": result.usage.prompt_tokens,
+            "completion_tokens": result.usage.completion_tokens,
+            "reasoning_tokens": result.usage.reasoning_tokens,
             "answer_preview": result.answer[:120],
         })
 
@@ -384,6 +417,10 @@ def run_eval(args) -> None:
         "true_negative_rate":  tn / max(1, no_answer_total),
         # 延迟
         "avg_latency_ms": total_latency_ms / max(1, n_evaluated),
+        # token 用量。延迟能反映 thinking 的代价，但延迟混着网络与排队，不能当账单
+        # 用；"关掉 thinking 省了多少钱"这个问题此前答不出来，就是因为这里是空的。
+        # ⚠️ avg_reasoning_tokens 是 avg_completion_tokens 的**一部分**，不要相加。
+        **_usage_metrics(per_item_rows),
     }
 
     # ── 实验记录 ────────────────────────────────────────────────
@@ -452,6 +489,7 @@ def run_eval(args) -> None:
     print(f"  false_positive_rate  : {metrics['false_positive_rate']:.3f}  (编造答案率，越低越好)")
     print(f"  false_negative_rate  : {metrics['false_negative_rate']:.3f}  (错误拒答率，越低越好)")
     print(f"  avg_latency_ms       : {metrics['avg_latency_ms']:.1f}")
+    _print_usage(metrics)
     if "ragas" in metrics:
         r = metrics["ragas"]
         print(f"  faithfulness         : {r['faithfulness']:.3f}  (答案忠实度)")
@@ -467,12 +505,31 @@ def run_eval(args) -> None:
 # --compare 工具
 # ---------------------------------------------------------------------------
 
+def _print_usage(m: dict, indent: str = "  ") -> None:
+    """token 用量。服务端没给 usage 时明说，不要让一排 0 冒充"没花钱"。"""
+    if "avg_prompt_tokens" not in m:
+        return
+    reported = m.get("usage_reported", 0.0)
+    if reported == 0.0:
+        print(f"{indent}tokens               : 服务端未返回 usage（无法计量）")
+        return
+    line = (f"{indent}avg_tokens           : in {m['avg_prompt_tokens']:.0f} / "
+            f"out {m['avg_completion_tokens']:.0f}")
+    if m.get("avg_reasoning_tokens"):
+        line += f"（其中 thinking {m['avg_reasoning_tokens']:.0f}）"
+    print(line)
+    print(f"{indent}total_tokens         : {m['total_tokens']:,}")
+    if reported < 1.0:
+        print(f"{indent}  ⚠️ 只有 {reported:.0%} 的样本拿到了 usage，均值偏低")
+
+
 def _print_gen_result(label: str, m: dict) -> None:
     print(f"\n  {label}")
     print(f"    semantic_hit_rate  : {m['semantic_hit_rate']:.3f}  (threshold={m.get('sim_threshold', '?')})")
     print(f"    false_positive_rate: {m['false_positive_rate']:.3f}")
     print(f"    false_negative_rate: {m['false_negative_rate']:.3f}")
     print(f"    avg_latency_ms     : {m['avg_latency_ms']:.1f}")
+    _print_usage(m, indent="    ")
     if "ragas" in m:
         print(f"    faithfulness       : {m['ragas']['faithfulness']:.3f}")
         print(f"    answer_relevancy   : {m['ragas']['answer_relevancy']:.3f}")
@@ -484,6 +541,9 @@ def _print_gen_diff(label_a: str, ma: dict, label_b: str, mb: dict) -> None:
         ("false_positive_rate", "false_positive_rate", True),
         ("false_negative_rate", "false_negative_rate", True),
         ("avg_latency_ms",      "avg_latency_ms",      True),
+        ("avg_prompt_tokens",     "avg_prompt_tokens",     True),
+        ("avg_completion_tokens", "avg_completion_tokens", True),
+        ("avg_reasoning_tokens",  "avg_reasoning_tokens",  True),
     ]
     print(f"\n  {'Metric':<22} {label_a[:18]:>18} {label_b[:18]:>18} {'Delta':>8}")
     print("  " + "-" * 70)
@@ -500,19 +560,95 @@ def _print_gen_diff(label_a: str, ma: dict, label_b: str, mb: dict) -> None:
             print(f"  {display:<22} {va:>18.3f} {vb:>18.3f} {sign+f'{delta:.3f}':>8}")
 
 
+def _exact_binom_two_sided(b: int, c: int) -> float:
+    """McNemar 精确检验：翻面共 n=b+c 次，问 b 是否偏离 n/2。"""
+    n = b + c
+    if n == 0:
+        return 1.0
+    k = min(b, c)
+    return min(sum(math.comb(n, i) for i in range(k + 1)) / 2 ** n * 2, 1.0)
+
+
+def _print_single_variable_check(pa: dict, pb: dict) -> None:
+    """两臂的 provenance 差在哪几个字段。差超过一个，单变量就不成立。"""
+    skip = {"ts", "timestamp", "run_id", "git_commit"}
+    diff = [(k, pa.get(k), pb.get(k)) for k in sorted(set(pa) | set(pb))
+            if k not in skip and pa.get(k) != pb.get(k)]
+    print("\n  --- 单变量检查 ---")
+    if not diff:
+        print("    ⚠️ 两臂配置完全相同——这是同一个配置跑了两遍，"
+              "测的是运行间噪声，不是效应。")
+        return
+    for k, va, vb in diff:
+        print(f"    {k:24s} {str(va)[:26]:>26} -> {str(vb)[:26]}")
+    if len(diff) > 1:
+        print(f"    ⚠️ 有 {len(diff)} 个字段不同，**不是单变量实验**"
+              "——差异归因不到任何一个。")
+
+
+def _print_paired_diff(rows_a: list[dict], rows_b: list[dict]) -> None:
+    """按 id 配对做 McNemar。
+
+    两臂跑的是同一批样本时，比率对比是错的：绝大多数"两臂完全一样"的样本也被
+    算进方差，而真正携带信息的只有翻面的那几条。这个仓库为此白跑过一次 200x2
+    的实验（结论"无差异"，其实是效应量 2.5 条对上标准误 0.057，根本测不出）。
+    所以配对是 --compare 的默认动作，不是可选的额外分析。
+    """
+    A = {r["id"]: r for r in rows_a}
+    B = {r["id"]: r for r in rows_b}
+    ids = sorted(set(A) & set(B))
+    if not ids:
+        print("\n  --- 配对对比 ---\n    两个文件没有共同样本，跳过。")
+        return
+
+    has = [i for i in ids if A[i].get("has_answer")]
+    no = [i for i in ids if not A[i].get("has_answer")]
+    print(f"\n  --- 配对对比（McNemar，共同样本 {len(ids)} 条："
+          f"有答案 {len(has)} / 无答案 {len(no)}）---")
+    print(f"    {'指标':<20}{'子集':>8}{'只有B好':>9}{'只有A好':>9}{'净':>6}{'p':>8}")
+    print("    " + "-" * 60)
+
+    # (字段, 子集, 子集名, 该字段为真是不是好事)
+    for field, subset, name, good_is_true in (
+        ("semantic_hit",   has, "有答案", True),
+        ("false_negative", has, "有答案", False),
+        ("false_positive", no,  "无答案", False),
+    ):
+        if not subset:
+            continue
+        only_a = sum(1 for i in subset if A[i].get(field) and not B[i].get(field))
+        only_b = sum(1 for i in subset if B[i].get(field) and not A[i].get(field))
+        gain, loss = (only_b, only_a) if good_is_true else (only_a, only_b)
+        p = _exact_binom_two_sided(only_a, only_b)
+        print(f"    {field:<20}{name:>8}{gain:>9}{loss:>9}{gain - loss:>+6}{p:>8.3f}")
+
+    deltas = sorted(B[i].get("latency_ms", 0.0) - A[i].get("latency_ms", 0.0)
+                    for i in ids)
+    med = deltas[len(deltas) // 2]
+    faster = sum(1 for d in deltas if d < 0)
+    print(f"\n    延迟逐条之差（B−A）中位 {med:+.0f}ms，{faster}/{len(deltas)} 条 B 更快")
+
+
 def compare_gen_files(paths: list[str]) -> None:
     results = []
     for p in paths:
         data = json.loads(Path(p).read_text(encoding="utf-8"))
-        results.append((Path(p).name, data["metrics"]))
+        results.append((Path(p).name, data))
 
     print("=== Generation Eval Compare ===")
-    for label, m in results:
-        _print_gen_result(label, m)
+    for label, d in results:
+        _print_gen_result(label, d["metrics"])
 
-    if len(results) == 2:
-        print("\n  --- Diff (B - A) ---")
-        _print_gen_diff(results[0][0], results[0][1], results[1][0], results[1][1])
+    if len(results) != 2:
+        return
+    (la, da), (lb, db) = results
+    print("\n  --- Diff (B - A) ---")
+    _print_gen_diff(la, da["metrics"], lb, db["metrics"])
+    _print_single_variable_check(da.get("provenance", {}), db.get("provenance", {}))
+    if da.get("per_item") and db.get("per_item"):
+        _print_paired_diff(da["per_item"], db["per_item"])
+    else:
+        print("\n  --- 配对对比 ---\n    结果文件里没有 per_item，跳过。")
 
 
 def parse_args():
@@ -527,6 +663,10 @@ def parse_args():
     p.add_argument("--generate-k",     type=int,   default=0,    help="喂给生成模型的 chunk 数；0 = 跟随 top_k")
     p.add_argument("--top-k",          type=int,   default=0,    help="检索返回条数，覆盖 config.yaml；0 = max(config, generate_k)")
     p.add_argument("--corpus",         action="store_true",      help="不按 doc_id 过滤，全库 corpus 检索")
+    p.add_argument("--thinking",       dest="thinking", action="store_true",  default=None,
+                   help="强制开启生成模型的 thinking，覆盖 config.yaml")
+    p.add_argument("--no-thinking",    dest="thinking", action="store_false",
+                   help="强制关闭生成模型的 thinking，覆盖 config.yaml")
     p.add_argument("--compare", nargs=2, metavar=("A", "B"), help="对比两个 gen_eval 结果文件，不运行新评估")
     return p.parse_args()
 

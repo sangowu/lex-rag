@@ -17,7 +17,7 @@ from typing import Iterator
 
 from lex_rag.chunking import ChunkWindow
 from lex_rag.config import ContextualConfig
-from lex_rag.llm import ChatClient
+from lex_rag.llm import ChatClient, Usage
 
 # 供 structured_output="json_schema" 时做服务端强制约束用。
 # json_object 模式下不发送——那时结构只靠 prompt 约束，_parse_response 的字段
@@ -118,6 +118,9 @@ class GenerationResult:
     is_refused: bool = False             # True = 模型判断合同中无相关信息
     latency_ms: float = 0.0
     error: str | None = None             # 非 None 表示调用失败
+    # token 用量。thinking 的成本只有在这里才看得见——延迟能反映它，但延迟还混着
+    # 网络和排队，不能当账单用。reasoning_tokens **已经含在** completion_tokens 里。
+    usage: Usage = field(default_factory=Usage)
     # 以下三个仅两段式（VerifiedGenerator）会填，单段路径保持默认值。
     verdict: dict | None = None          # 校验环节的 Verdict.to_dict()
     llm_calls: int = 1                   # 本次回答一共打了几次 LLM
@@ -212,10 +215,10 @@ class LegalGenerator:
 
         return answer, False, citations
 
-    def _call_llm(self, prompt: str) -> dict:
-        """JSON mode 调用，返回解析后的 dict。重试与 tracing 都在 ChatClient 里。"""
-        return self._chat.complete_json(prompt, schema=_RESPONSE_SCHEMA,
-                                        trace_name="generator.generate")
+    def _call_llm(self, prompt: str) -> tuple[dict, Usage]:
+        """JSON mode 调用，返回 (解析后的 dict, token 用量)。重试与 tracing 在 ChatClient 里。"""
+        return self._chat.complete_json_with_usage(prompt, schema=_RESPONSE_SCHEMA,
+                                                   trace_name="generator.generate")
 
     def generate_stream(
         self,
@@ -345,7 +348,7 @@ class LegalGenerator:
 
         t0 = time.perf_counter()
         try:
-            data = self._call_llm(prompt)
+            data, usage = self._call_llm(prompt)
         except Exception as e:
             return GenerationResult(
                 question=question,
@@ -364,6 +367,7 @@ class LegalGenerator:
             citations=citations,
             is_refused=is_refused,
             latency_ms=latency_ms,
+            usage=usage,
         )
 
 
