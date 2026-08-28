@@ -9,11 +9,27 @@ from lex_rag.chunking import ChunkWindow
 
 class VectorStore:
     def __init__(self, dsn: str, table: str = "chunks", init_schema: bool = True):
-        self.conn = psycopg.connect(dsn)
+        # **autocommit=True 是必须的，不是风格选择。**
+        #
+        # psycopg 默认 autocommit=False：第一条语句就隐式开一个事务，而 `_cursor()`
+        # 只在**出错时** rollback，成功路径不 commit。于是每做完一次**只读**查询，
+        # 连接就永久停在 `idle in transaction`，一直攥着 chunks 的 ACCESS SHARE 锁。
+        #
+        # 两个后果，第二个更隐蔽：
+        #   ① 别的进程对该表做任何 DDL 会无限阻塞。实测：serve.py 起着的时候另起
+        #      一个进程，它的 `_init_schema()` 的 `ALTER TABLE chunks ADD COLUMN`
+        #      直接挂死（pg_stat_activity 里 wait_event=Lock/relation），
+        #      表现为"脚本卡住不动"，没有任何报错。
+        #   ② 长期 idle in transaction 钉住事务快照，**VACUUM 无法回收死元组**。
+        #      serve.py 是长驻进程，跑得越久表膨胀越严重。
+        #
+        # 改成 autocommit 后每条语句自己结束，读完即释放。写路径需要多语句原子性的
+        # 地方用 `self.conn.transaction()` 显式声明——显式的事务边界比"靠默认值
+        # 攒出来的隐式事务"更难写错。
+        self.conn = psycopg.connect(dsn, autocommit=True)
         self.table = table
         with self._cursor() as cur:
             cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
-        self.conn.commit()
         register_vector(self.conn)
         if init_schema:
             self._init_schema()
@@ -30,6 +46,11 @@ class VectorStore:
 
         实测：4 个 worker 同时构造 VectorStore 触发 DDL 死锁后，同一批 20 条里
         15 条全部报 InFailedSqlTransaction，真正的死锁只发生过一次。
+
+        连接是 autocommit 的（见 `__init__`），单条语句失败不会留下坏事务，
+        这里的 rollback 是为**显式事务块内**出错准备的——`conn.transaction()`
+        自己会回滚，但嵌在里面的失败若被上层吞掉，这一层是最后的兜底。
+        autocommit 下 `rollback()` 是 no-op，留着不会有副作用。
         """
         try:
             with self.conn.cursor() as cur:
@@ -98,7 +119,9 @@ class VectorStore:
                     extracted_at   TIMESTAMPTZ DEFAULT now()
                 )
             """)
-        self.conn.commit()
+        # **故意不包 `conn.transaction()`。** 这里全是 IF NOT EXISTS，重复执行安全，
+        # 逐条提交能让每把 DDL 锁尽早释放；包成一个事务只会把锁窗口拉长，
+        # 而多 worker 并发建表互相死锁正是这里出过的事故（见 `_cursor` 注释）。
 
     def save_meta(self, chunk_chars: int, overlap: int, strategy: str,
                   contextual: bool, chunk_mode: str = "standard") -> None:
@@ -115,7 +138,6 @@ class VectorStore:
                         chunk_mode  = EXCLUDED.chunk_mode,
                         ingested_at = EXCLUDED.ingested_at
             """, (self.table, chunk_chars, overlap, strategy, contextual, chunk_mode))
-        self.conn.commit()
 
     def load_meta(self) -> dict | None:
         with self._cursor() as cur:
@@ -138,10 +160,19 @@ class VectorStore:
     def truncate(self) -> None:
         with self._cursor() as cur:
             cur.execute(f"TRUNCATE TABLE {self.table}")
-        self.conn.commit()
 
     def add_chunks(self, chunks: list[ChunkWindow], embeddings: list[list[float]]) -> None:
-        with self._cursor() as cur:
+        """一批 chunk 一个事务。
+
+        这是本文件里唯一**必须**显式包事务的地方：循环里一行一条 INSERT，
+        autocommit 下会变成每行一次提交（每次 fsync），既慢又会在中途崩溃时
+        留下写了一半的表。原来靠"默认不 autocommit + 末尾 commit()"达到同样
+        效果，但那个事务边界是隐式的，读路径也一起被卷进去——正是本次要修的病。
+
+        这里用 `conn.cursor()` 而不是 `_cursor()`：事务块内调 `conn.rollback()`
+        会抛 ProgrammingError，而回滚本来就该由 `transaction()` 自己做。
+        """
+        with self.conn.transaction(), self.conn.cursor() as cur:
             for chunk, embedding in zip(chunks, embeddings):
                 cur.execute(f"""
                     INSERT INTO {self.table}
@@ -150,7 +181,6 @@ class VectorStore:
                     ON CONFLICT (chunk_id) DO NOTHING
                 """, (chunk.chunk_id, chunk.doc_id, chunk.text, chunk.start, chunk.end,
                       embedding, chunk.parent_chunk_id))
-        self.conn.commit()
 
     def expand_to_parent(self, children: list[ChunkWindow]) -> list[ChunkWindow]:
         """
@@ -231,7 +261,6 @@ class VectorStore:
                 meta.get("key_clauses", []),
                 json.dumps(meta),
             ))
-        self.conn.commit()
 
     def get_doc_meta(self, doc_id: str) -> dict | None:
         with self._cursor() as cur:
