@@ -38,7 +38,15 @@ retrieval:
   rerank_top_k: 60            # 送入 reranker 的候选数（>= top_k）
 
 reranker:
-  enabled: false              # true 时 pipeline.query() 自动 rerank（或用 --reranker 覆盖）
+  # 2026-08-29 由 false 改 true。原值 false 造成一处静默的不一致：
+  # 各评测脚本都靠 `--reranker` 打开它（`if args.reranker: enabled=True`，只加不减），
+  # 于是文档里**所有**基线数字都是开着 reranker 测的；而 serve.py 从不覆盖这个字段，
+  # 线上问答就一直走在没被评测过的那一档上。
+  # 更糟的是 strategy.py 里 `fetch_k = rerank_top_k if rerank_on else top_k`——
+  # 不开 rerank 时候选池直接从 60 塌到 20，线上连候选都比评测时少。
+  # 代价：每查询多一次 rerank 往返；TPM 配额是账号级的，见下面 tpm_limit。
+  # 由 tests/test_serve_defaults.py 钉住"线上跑的就是被评测的那条配置"。
+  enabled: true               # pipeline.query() 自动 rerank（--reranker 现在是 no-op）
   provider: direct            # direct(TEI 风格 /v1/rerank) | bge_http | macrolens
   model: BAAI/bge-reranker-v2-m3
   # SiliconFlow，与 embedding 同一 host。写不写结尾的 /v1 都可以：

@@ -53,3 +53,36 @@ def test_zero_is_accepted_as_follow_the_default(cfg_top_k):
     cfg_top_k(20)
     req = QueryRequest(question="q", top_k=0, generate_k=0)
     assert (req.resolved_top_k(), req.resolved_generate_k()) == (20, 20)
+
+
+# --- 线上跑的必须就是被评测的那条配置 -------------------------------------
+
+def test_served_path_reranks_like_the_benchmarks_do():
+    """`reranker.enabled` 曾是 false，于是线上走在一条从没被评测过的档位上。
+
+    各评测脚本都靠 `--reranker` 打开它（`if args.reranker: enabled=True`，只加不减），
+    所以文档里**所有**基线数字都是开着 reranker 测的；而 serve.py 从不覆盖这个
+    字段，线上就一直不重排。症状和 top_k 那次漂移一样：完全无声，功能照常返回答案。
+    """
+    from lex_rag.config import load_config
+    from lex_rag.strategy import RetrievalStrategy
+
+    st = RetrievalStrategy.from_config(load_config())
+
+    assert st.rerank is True
+
+
+def test_candidate_pool_does_not_collapse_to_top_k():
+    """不开 rerank 时 `fetch_k` 会塌成 `top_k`——线上连候选都比评测时少。
+
+    见 strategy.py: `fetch_k = rerank_top_k if rerank_on else top_k`。
+    这一条比上一条更隐蔽：就算哪天有人手工在 serve 里补上重排，候选池也得是 60。
+    """
+    from lex_rag.config import load_config
+    from lex_rag.strategy import RetrievalStrategy
+
+    cfg = load_config()
+    st = RetrievalStrategy.from_config(cfg)
+
+    assert st.fetch_k == cfg.retrieval.rerank_top_k
+    assert st.fetch_k > st.top_k

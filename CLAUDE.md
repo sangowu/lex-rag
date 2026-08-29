@@ -668,6 +668,19 @@ Jaccard 1.000 → 0.794 和净救回 0 → 2~4，不是这两个数。
 
 ## 关键约束
 
+- **`reranker.enabled` 必须是 `true`，否则线上跑的不是被评测的那条配置**（2026-08-29 修）。
+  各评测脚本靠 `--reranker` 打开它（`if args.reranker: enabled=True`，**只加不减**），
+  所以文档里所有基线数字都是开着 reranker 测的；而 `serve.py` 从不覆盖这个字段，
+  线上问答就一直走在没被评测过的那一档。更隐蔽的是 `strategy.py` 的
+  `fetch_k = rerank_top_k if rerank_on else top_k`——不开 rerank 时候选池从 60
+  **塌到 20**，线上连候选都比评测时少。
+  实测 12 条：两条路径的 top-20 **Jaccard 中位仅 0.481**（区间 0.29~0.67），
+  **top-1 只有 2/12 条相同**——不是"稍微差一点"，是两条不同的系统。
+  代价是每查询 **+2.1s**（重排中位 2125ms vs 不重排 6ms；后者小是因为 embedding
+  命中缓存，真实新问题还要加约 200~300ms）。
+  由 `tests/test_serve_defaults.py` 钉住，和 top_k 那次漂移是同一类事故：**完全无声，
+  功能照常返回答案**。
+
 - **API + UI 已合并为单一进程**：`serve.py` 通过 `gr.mount_gradio_app()` 在同一进程内同时提供 REST API（`/query`）和 Gradio UI（`/ui`），共享同一 `VectorStore` 连接，无锁竞争。`ui.py` 已删除。
 - **切换 contextual 模式必须完整重新 ingest**（TRUNCATE + 重建），`ON CONFLICT DO NOTHING` 不会更新已有行
 - Embedding / Reranker endpoint 由 `config.yaml` 的 `embedding.base_url` / `reranker.base_url` 指定，需要提前启动；两者可以是同一个服务，也可以分开。远程 GPU 时通过 `provider: ssh_tunnel` 配置 SSH 端口转发
