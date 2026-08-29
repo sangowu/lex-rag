@@ -71,7 +71,8 @@ def run_eval(args) -> dict:
     print(f"Chunk      : {chunk_chars} chars, overlap={overlap}, strategy={strategy}, contextual={contextual}")
     print()
 
-    result = evaluate(pipeline, qa_items, cfg.evaluation)
+    ev_cfg = cfg.evaluation
+    result = evaluate(pipeline, qa_items, ev_cfg)
     pipeline.close()
 
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -90,11 +91,12 @@ def run_eval(args) -> dict:
         "ingested_at": ingested_at,
         "rerank_top_k": cfg.retrieval.rerank_top_k if cfg.reranker.enabled else None,
         "chunk_mode":  chunk_mode,
-        "hit@1":       result.hit_at_k.get(1,  0.0),
-        "hit@3":       result.hit_at_k.get(3,  0.0),
-        "hit@5":       result.hit_at_k.get(5,  0.0),
-        "hit@10":      result.hit_at_k.get(10, 0.0),
-        "mrr@5":       result.mrr_at_k.get(5,  0.0),
+        # ⚠️ 这里曾把 hit@1/3/5/10 写死。config 的 k_values 加了新的 k，
+        # evaluate() 照算，但算完落不进结果文件——报表静默停在旧的那几格。
+        # 和 serve.py 硬编码 top_k=10、reranker.enabled=false 是同一类漂移：
+        # 配置改了，读配置的那一端没跟上，而且完全无声。所以改成按 k_values 展开。
+        **{f"hit@{k}": result.hit_at_k.get(k, 0.0) for k in ev_cfg.k_values},
+        **{f"mrr@{k}": result.mrr_at_k.get(k, 0.0) for k in ev_cfg.k_values},
         "precision@5": result.precision_at_k.get(5, 0.0),
         "recall@5":    result.recall_at_k.get(5,  0.0),
         "latency_ms":  round(result.avg_latency_ms, 2),
@@ -226,15 +228,29 @@ def print_agentic_result(r: dict) -> None:
           f"(recovery_rate × empty_rate)")
 
 
+def _ks(r: dict, prefix: str) -> list[int]:
+    """结果文件里实际存在的 k，从小到大。
+
+    不同 k_values 跑出来的文件放在一起比是常态（加 @20 那次就是），
+    写死一组 k 会让旧文件 KeyError、新文件少报几格。
+    """
+    return sorted(int(key.split("@")[1]) for key in r if key.startswith(prefix + "@"))
+
+
 def print_result(r: dict, label: str = "") -> None:
     tag = f"[{label}] " if label else ""
-    print(f"  {tag}hit@1={r['hit@1']:.3f}  hit@5={r['hit@5']:.3f}  hit@10={r['hit@10']:.3f}"
-          f"  mrr@5={r['mrr@5']:.3f}  p@5={r['precision@5']:.3f}  r@5={r['recall@5']:.3f}"
+    hits = " ".join(f"hit@{k}={r[f'hit@{k}']:.3f}" for k in _ks(r, "hit"))
+    mrrs = " ".join(f"mrr@{k}={r[f'mrr@{k}']:.3f}" for k in _ks(r, "mrr"))
+    print(f"  {tag}{hits}  {mrrs}  p@5={r['precision@5']:.3f}  r@5={r['recall@5']:.3f}"
           f"  lat={r['latency_ms']}ms")
 
 
 def print_diff(a: dict, b: dict, label_a: str, label_b: str) -> None:
-    metrics = ["hit@1", "hit@5", "hit@10", "mrr@5", "precision@5", "recall@5"]
+    # 只比两个文件都有的 k——k_values 不同的两轮放一起比是常态。
+    common = sorted(set(_ks(a, "hit")) & set(_ks(b, "hit")))
+    metrics = ([f"hit@{k}" for k in common]
+               + [f"mrr@{k}" for k in sorted(set(_ks(a, "mrr")) & set(_ks(b, "mrr")))]
+               + ["precision@5", "recall@5"])
     print(f"\n  {'Metric':<14} {label_a:>10} {label_b:>10} {'Delta':>10}")
     print("  " + "-" * 48)
     for m in metrics:

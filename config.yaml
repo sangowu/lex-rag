@@ -77,7 +77,9 @@ database:
   table: chunks                # 切换到 chunks_contextual 可对比 contextual RAG 效果
 
 evaluation:
-  k_values: [1, 3, 5, 10]
+  # 加 20：generate_k 跟随 top_k=20，真正约束系统的是 hit@20 而不是 hit@10。
+  # 报表停在 @10 的时候，"检索天花板"这个问题只能靠一次性脚本回答。
+  k_values: [1, 3, 5, 10, 20]
   scope: contract             # contract | corpus
   mode: span                  # span | containment
 
