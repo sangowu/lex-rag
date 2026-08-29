@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 from lex_rag.chunking import ChunkWindow
 from lex_rag.config import ContextualConfig
 from lex_rag.generator import LegalGenerator
+from lex_rag.llm import Usage
 
 
 def _cfg() -> ContextualConfig:
@@ -102,7 +103,10 @@ def test_generate_refuses_immediately_when_no_chunks_retrieved():
 
 def test_generate_parses_llm_result_into_citations():
     gen = LegalGenerator(_cfg())
-    gen._call_llm = MagicMock(return_value={"refused": False, "answer": 'Yes "clause" [1].'})
+    gen._call_llm = MagicMock(return_value=(
+        {"refused": False, "answer": 'Yes "clause" [1].'},
+        Usage(prompt_tokens=120, completion_tokens=30, reported=True),
+    ))
     chunks = [_chunk("c1", "doc1", "clause text")]
 
     result = gen.generate("question?", chunks)
@@ -111,6 +115,8 @@ def test_generate_parses_llm_result_into_citations():
     assert result.answer == 'Yes "clause" [1].'
     assert len(result.citations) == 1
     assert result.error is None
+    # token 用量要一路带到结果里——只喂给 tracing 的话，没配 Langfuse 就完全看不见
+    assert (result.usage.prompt_tokens, result.usage.completion_tokens) == (120, 30)
 
 
 def test_generate_returns_error_result_when_llm_call_raises():
@@ -122,3 +128,6 @@ def test_generate_returns_error_result_when_llm_call_raises():
 
     assert result.error == "boom"
     assert result.answer == ""
+    # 调用失败时没有 usage 可言，但字段必须存在且可求和，不能是 None
+    assert result.usage.total_tokens == 0
+    assert result.usage.reported is False

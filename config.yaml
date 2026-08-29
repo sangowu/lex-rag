@@ -79,10 +79,26 @@ contextual:
   enabled: false              # true 时 ingest 阶段为每个 chunk 调用 LLM 生成上下文前缀
   model: qwen3.7-flash
   base_url: https://dashscope.aliyuncs.com/compatible-mode/v1   # DashScope，OpenAI 兼容
-  # thinking 在 deepseek 上是净收益：横评里误拒从 0.50 降到 0.20，判别力 J 从
-  # 0.50 升到 0.80（data/runs/bakeoff/20260825T174242Z.json）。代价是延迟从
-  # 1.8s 涨到 9.4s。注意这个结论是模型相关的——同一开关在 qwen3.7-plus 上是负收益。
-  thinking: true
+  # ⚠️ 这个字段不只喂生成层：SufficiencyJudge、StrategySelector、HyDE、
+  # 元数据抽取、查询扩展全都读它（都走 ChatClient.from_config(cfg.contextual)）。
+  # 改它是一次多组件改动，不是单变量。
+  #
+  # 2026-08-28 由 true 改 false，依据是 200 条配对 A/B（同一批样本按 id 配对，
+  # 只差这一个字段，run 20260828T194756Z vs 20260828T195620Z）：
+  #   延迟      7927ms -> 896ms，200/200 条全部更快，逐条之差中位 -6.1s
+  #   编造(FP)  16/150 -> 11/150
+  #   误拒(FN)   1/50  ->  4/50
+  #   J          0.873 ->  0.847
+  # J 的差 0.026 与**同配置跑两遍**的差 0.026 一样大（A 复本 191840Z: J=0.847），
+  # 也就是质量差异测不出来，而延迟差 9 倍。两个指标各自都不显著
+  # （p=0.180 / 0.375），方向相反且互相抵消。
+  #
+  # 拒答门总错 17 -> 15，且错误偏向"拒答"而不是"编造"——法务场景里这是安全的
+  # 那一侧，产品决策就按这条定的。
+  #
+  # ⚠️ 作废一条旧结论：文档里"关掉 thinking 会让 J 从 0.60 掉到 0.40"是 10 条
+  # 横评的产物，在 200 条配对上不成立。
+  thinking: false
   rpm_limit: 120               # 控制 API 调用频率
   max_retries: 3
   retry_backoff_sec: 2.0      # 指数退避基数（秒）
