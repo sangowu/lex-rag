@@ -16,6 +16,7 @@ import argparse
 import sys
 import json
 import math
+import re
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -32,6 +33,47 @@ from lex_rag.pipeline import RAGPipeline
 # 维度一：语义相似度（embedding cosine similarity）
 # ---------------------------------------------------------------------------
 
+_WS_RE = re.compile(r"\s+")
+# 合同原文里全角引号 / en dash 很常见，gold span 抄出来时经常被换成半角。
+# 这是排版差异，不是内容差异，判据必须先抹平它。
+# str.maketrans 接受 {码位: 替换串}，这里刻意用码位而不是字面字符——
+# NBSP 写成字面量就是源码里一个隐形字符，改坏了看不出来。
+_TYPOGRAPHY = {
+    0x201C: '"', 0x201D: '"',   # 弯双引号
+    0x2018: "'", 0x2019: "'",   # 弯单引号
+    0x2013: "-", 0x2014: "-",   # en / em dash
+    0x00A0: " ",                # NBSP
+}
+
+# gold 短于这个长度就不用包含判据。"Inc" / "LLC" / "the" 这种碎片能在几乎任何
+# 答案里撞上，那不是命中，是巧合。CUAD 里真正有意义的最短 gold 是 4 字符级别
+# （如 "1999"），所以门槛设在这里。
+_MIN_GOLD_CHARS = 4
+
+
+def _normalize(text: str) -> str:
+    """包含判据用的归一化：只抹排版差异，不删标点、不动词形。
+
+    删标点会让 "Party A, Inc." 和 "Party AInc" 判成同一个；不删则 gold 里的
+    标点必须原样出现。逐字引用场景下后者才是对的——prompt 要求的就是原文照抄。
+    """
+    return _WS_RE.sub(" ", text.translate(_TYPOGRAPHY)).strip().lower()
+
+
+def _contains_gold(answer: str, gold: str) -> bool:
+    """gold span 是否**逐字**出现在答案里。
+
+    这条判据的存在理由：prompt 明确要求 "quote the exact sentence(s) that contain
+    the answer"，而 CUAD 的 gold 是从那句话里抽出来的短 span。于是一句 40 词的
+    原文引用 vs 一个 5 词的 span，余弦只有 0.5 左右——**整句里逐字含着 gold，
+    却被判成没命中**。旧尺子惩罚的正是 prompt 要求的行为。
+    """
+    g = _normalize(gold)
+    if len(g) < _MIN_GOLD_CHARS:
+        return False
+    return g in _normalize(answer)
+
+
 def _cosine(a: list[float], b: list[float]) -> float:
     dot = sum(x * y for x, y in zip(a, b))
     norm_a = math.sqrt(sum(x * x for x in a))
@@ -46,8 +88,15 @@ def compute_semantic_hits(
     per_item_rows: list[dict],
     cfg,
     threshold: float,
-) -> int:
-    """批量 embed，计算 answer 与最优 gold 的余弦相似度，更新 per_item_rows["semantic_hit"]。"""
+) -> dict[str, int]:
+    """批量 embed，逐条判定命中，更新 per_item_rows 上的三个 semantic_* 字段。
+
+    命中 = **包含判据 或 余弦判据**。两个都记，因为：
+      · 包含判据管逐字引用（prompt 要求的行为，旧尺子恰好判它不及格）；
+      · 余弦判据管改写（模型用自己的话答对时 gold 不会字面出现）。
+    ⚠️ `semantic_hit_cosine` 必须单独留着——历史上所有 semantic_hit_rate 都是
+    余弦判据测的，不留这一格就切断了与历史结果的可比性。
+    """
     from lex_rag.embeddings import EmbeddingClient
 
     # 收集所有待 embed 的文本（去重）
@@ -60,38 +109,44 @@ def compute_semantic_hits(
                 seen.add(t)
 
     if not all_texts:
-        return 0
+        return {"hit": 0, "cosine": 0, "contain_only": 0}
 
     print(f"\n[Semantic Similarity] embedding {len(all_texts)} texts ...")
     embedder = EmbeddingClient(cfg.embedding, cache_path=Path("data/embed_cache_eval.pkl"))
     vecs_list = embedder.embed_texts(all_texts)
     vec_map: dict[str, list[float]] = dict(zip(all_texts, vecs_list))
 
-    hits = 0
+    counts = {"hit": 0, "cosine": 0, "contain_only": 0}
     for d in sim_data:
         answer = d["answer"]
         golds = [g for g in d["golds"] if g.strip()]
         row = per_item_rows[d["row_idx"]]
 
         if not answer or not golds:
-            row["semantic_hit"] = False
-            row["semantic_sim"] = 0.0
+            _set_hit(row, cos_hit=False, contains=False, max_sim=0.0, counts=counts)
             continue
+
+        # 包含判据先算：它不依赖 embedding，embedding 挂了也还剩一半判据在。
+        contains = any(_contains_gold(answer, g) for g in golds)
 
         a_vec = vec_map.get(answer)
-        if a_vec is None:
-            row["semantic_hit"] = False
-            row["semantic_sim"] = 0.0
-            continue
+        sims = [_cosine(a_vec, vec_map[g]) for g in golds if g in vec_map] if a_vec else []
+        max_sim = max(sims) if sims else 0.0
+        _set_hit(row, cos_hit=max_sim >= threshold, contains=contains,
+                 max_sim=max_sim, counts=counts)
 
-        max_sim = max(_cosine(a_vec, vec_map[g]) for g in golds if g in vec_map)
-        hit = max_sim >= threshold
-        row["semantic_hit"] = hit
-        row["semantic_sim"] = round(max_sim, 4)
-        if hit:
-            hits += 1
+    return counts
 
-    return hits
+
+def _set_hit(row: dict, *, cos_hit: bool, contains: bool,
+             max_sim: float, counts: dict[str, int]) -> None:
+    row["semantic_hit"] = cos_hit or contains
+    row["semantic_hit_cosine"] = cos_hit
+    row["semantic_hit_contains"] = contains
+    row["semantic_sim"] = round(max_sim, 4)
+    counts["hit"] += int(cos_hit or contains)
+    counts["cosine"] += int(cos_hit)
+    counts["contain_only"] += int(contains and not cos_hit)
 
 
 # ---------------------------------------------------------------------------
@@ -372,6 +427,8 @@ def run_eval(args) -> None:
             "id": item.id,
             "has_answer": item.has_answer,
             "semantic_hit": False,      # 由 compute_semantic_hits 更新
+            "semantic_hit_cosine": False,
+            "semantic_hit_contains": False,
             "semantic_sim": 0.0,
             **refusal,
             "is_refused": result.is_refused,
@@ -381,7 +438,12 @@ def run_eval(args) -> None:
             "prompt_tokens": result.usage.prompt_tokens,
             "completion_tokens": result.usage.completion_tokens,
             "reasoning_tokens": result.usage.reasoning_tokens,
-            "answer_preview": result.answer[:120],
+            # ⚠️ 存**完整**答案与 gold，不是 120 字符的预览。
+            # 预览是个真实的坑：换判据想离线重算时，长引用的 gold 正好落在
+            # 截断之外，重算只能给出下界，非重跑不可。一条几百字节，
+            # 200 条不值得为此省。
+            "answer": result.answer,
+            "gold_answers": list(item.answers),
         })
 
         # 仅 has_answer=True 且有实际答案时计入语义相似度
@@ -409,7 +471,10 @@ def run_eval(args) -> None:
         "errors": errors,
         "sim_threshold": args.sim_threshold,
         # 语义相似度命中率（has_answer=True 子集）
-        "semantic_hit_rate": semantic_hits / max(1, has_answer_total),
+        "semantic_hit_rate": semantic_hits["hit"] / max(1, has_answer_total),
+        # 旧尺子。历史结果全是这么测的，删掉就没法和 v4/v5 的表比。
+        "semantic_hit_rate_cosine": semantic_hits["cosine"] / max(1, has_answer_total),
+        "semantic_contain_only": semantic_hits["contain_only"],
         # 拒答
         "false_positive_rate": fp / max(1, no_answer_total),   # 越低越好
         "false_negative_rate": fn / max(1, has_answer_total),  # 越低越好
@@ -485,7 +550,10 @@ def run_eval(args) -> None:
     # ---------------------------------------------------------------------------
 
     print("\n=== Generation Eval Results ===")
-    print(f"  semantic_hit_rate    : {metrics['semantic_hit_rate']:.3f}  (threshold={args.sim_threshold})")
+    print(f"  semantic_hit_rate    : {metrics['semantic_hit_rate']:.3f}  "
+          f"(逐字包含 或 cosine>={args.sim_threshold})")
+    print(f"    └ 仅 cosine（旧尺子）: {metrics['semantic_hit_rate_cosine']:.3f}  ← 与历史结果可比")
+    print(f"    └ 仅靠包含认出       : {metrics['semantic_contain_only']} 条")
     print(f"  false_positive_rate  : {metrics['false_positive_rate']:.3f}  (编造答案率，越低越好)")
     print(f"  false_negative_rate  : {metrics['false_negative_rate']:.3f}  (错误拒答率，越低越好)")
     print(f"  avg_latency_ms       : {metrics['avg_latency_ms']:.1f}")
@@ -526,6 +594,11 @@ def _print_usage(m: dict, indent: str = "  ") -> None:
 def _print_gen_result(label: str, m: dict) -> None:
     print(f"\n  {label}")
     print(f"    semantic_hit_rate  : {m['semantic_hit_rate']:.3f}  (threshold={m.get('sim_threshold', '?')})")
+    if "semantic_hit_rate_cosine" in m:
+        print(f"      └ 仅 cosine      : {m['semantic_hit_rate_cosine']:.3f}  "
+              f"(仅靠包含认出 {m.get('semantic_contain_only', 0)} 条)")
+    else:
+        print("      └ 仅 cosine      : 同上（这个文件早于包含判据，semantic_hit_rate 就是纯 cosine）")
     print(f"    false_positive_rate: {m['false_positive_rate']:.3f}")
     print(f"    false_negative_rate: {m['false_negative_rate']:.3f}")
     print(f"    avg_latency_ms     : {m['avg_latency_ms']:.1f}")
@@ -535,9 +608,17 @@ def _print_gen_result(label: str, m: dict) -> None:
         print(f"    answer_relevancy   : {m['ragas']['answer_relevancy']:.3f}")
 
 
+def _metric(m: dict, key: str) -> float:
+    if key == "semantic_hit_rate_cosine" and key not in m:
+        return m.get("semantic_hit_rate", 0.0)
+    return m.get(key, 0.0)
+
+
 def _print_gen_diff(label_a: str, ma: dict, label_b: str, mb: dict) -> None:
     rows = [
         ("semantic_hit_rate",   "semantic_hit_rate",   False),
+        # 两臂配置相同时，这一行必须不动——它一动就说明改的不只是尺子。
+        ("semantic_hit_rate_cosine", "  └ 仅 cosine",   False),
         ("false_positive_rate", "false_positive_rate", True),
         ("false_negative_rate", "false_negative_rate", True),
         ("avg_latency_ms",      "avg_latency_ms",      True),
@@ -548,7 +629,9 @@ def _print_gen_diff(label_a: str, ma: dict, label_b: str, mb: dict) -> None:
     print(f"\n  {'Metric':<22} {label_a[:18]:>18} {label_b[:18]:>18} {'Delta':>8}")
     print("  " + "-" * 70)
     for key, display, lower_is_better in rows:
-        va, vb = ma.get(key, 0.0), mb.get(key, 0.0)
+        # 早于包含判据的结果文件没有 *_cosine 字段，但它的 semantic_hit_rate
+        # 本来就是纯 cosine 测出来的——回落到它，别拿 0.0 去做差。
+        va, vb = _metric(ma, key), _metric(mb, key)
         delta = vb - va
         sign = "+" if delta >= 0 else ""
         print(f"  {display:<22} {va:>18.3f} {vb:>18.3f} {sign+f'{delta:.3f}':>8}")
@@ -608,19 +691,32 @@ def _print_paired_diff(rows_a: list[dict], rows_b: list[dict]) -> None:
     print(f"    {'指标':<20}{'子集':>8}{'只有B好':>9}{'只有A好':>9}{'净':>6}{'p':>8}")
     print("    " + "-" * 60)
 
+    # 新旧尺子混在一起会让 semantic_hit 这一行比的是两把尺子而不是两个配置。
+    # 旧文件的 semantic_hit 就是纯 cosine，所以 cosine 那一格总是可比的。
+    mixed = ("semantic_hit_cosine" in next(iter(A.values()), {})) !=             ("semantic_hit_cosine" in next(iter(B.values()), {}))
+    if mixed:
+        print("    ⚠️ 两臂用的判据不同（一边含逐字包含判据，一边没有）。"
+              "semantic_hit 这一行不可比，只看 └ 仅 cosine。")
+
+    def _cos(r: dict) -> bool:
+        return bool(r.get("semantic_hit_cosine", r.get("semantic_hit")))
+
     # (字段, 子集, 子集名, 该字段为真是不是好事)
     for field, subset, name, good_is_true in (
         ("semantic_hit",   has, "有答案", True),
+        ("__cosine__",     has, "有答案", True),
         ("false_negative", has, "有答案", False),
         ("false_positive", no,  "无答案", False),
     ):
         if not subset:
             continue
-        only_a = sum(1 for i in subset if A[i].get(field) and not B[i].get(field))
-        only_b = sum(1 for i in subset if B[i].get(field) and not A[i].get(field))
+        get = _cos if field == "__cosine__" else (lambda r: bool(r.get(field)))
+        only_a = sum(1 for i in subset if get(A[i]) and not get(B[i]))
+        only_b = sum(1 for i in subset if get(B[i]) and not get(A[i]))
         gain, loss = (only_b, only_a) if good_is_true else (only_a, only_b)
         p = _exact_binom_two_sided(only_a, only_b)
-        print(f"    {field:<20}{name:>8}{gain:>9}{loss:>9}{gain - loss:>+6}{p:>8.3f}")
+        label = "  └ 仅 cosine" if field == "__cosine__" else field
+        print(f"    {label:<20}{name:>8}{gain:>9}{loss:>9}{gain - loss:>+6}{p:>8.3f}")
 
     deltas = sorted(B[i].get("latency_ms", 0.0) - A[i].get("latency_ms", 0.0)
                     for i in ids)
