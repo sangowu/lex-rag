@@ -21,6 +21,9 @@ data/omnidocbench_annotations.json
 data/embed_cache*.pkl
 data/*.pkl
 data/*.jsonl
+# 回归集是**源码不是产物**：手工挑的 16 条案例，tests/test_gate.py 直接读它。
+# 被 data/*.jsonl 一并忽略掉的话，本地全绿而 CI 里 FileNotFoundError。
+!data/regression_set.jsonl
 
 # LLM caches
 .cache/

@@ -16,7 +16,6 @@ import argparse
 import sys
 import json
 import math
-import re
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -27,51 +26,19 @@ from lex_rag.config import load_config, RagasConfig
 from lex_rag.cuad import load_qa, QAItem
 from lex_rag.generator import LegalGenerator, GenerationResult
 from lex_rag.pipeline import RAGPipeline
+from lex_rag.text_match import MIN_GOLD_CHARS, contains_gold, normalize
 
 
 # ---------------------------------------------------------------------------
 # 维度一：语义相似度（embedding cosine similarity）
 # ---------------------------------------------------------------------------
 
-_WS_RE = re.compile(r"\s+")
-# 合同原文里全角引号 / en dash 很常见，gold span 抄出来时经常被换成半角。
-# 这是排版差异，不是内容差异，判据必须先抹平它。
-# str.maketrans 接受 {码位: 替换串}，这里刻意用码位而不是字面字符——
-# NBSP 写成字面量就是源码里一个隐形字符，改坏了看不出来。
-_TYPOGRAPHY = {
-    0x201C: '"', 0x201D: '"',   # 弯双引号
-    0x2018: "'", 0x2019: "'",   # 弯单引号
-    0x2013: "-", 0x2014: "-",   # en / em dash
-    0x00A0: " ",                # NBSP
-}
-
-# gold 短于这个长度就不用包含判据。"Inc" / "LLC" / "the" 这种碎片能在几乎任何
-# 答案里撞上，那不是命中，是巧合。CUAD 里真正有意义的最短 gold 是 4 字符级别
-# （如 "1999"），所以门槛设在这里。
-_MIN_GOLD_CHARS = 4
-
-
-def _normalize(text: str) -> str:
-    """包含判据用的归一化：只抹排版差异，不删标点、不动词形。
-
-    删标点会让 "Party A, Inc." 和 "Party AInc" 判成同一个；不删则 gold 里的
-    标点必须原样出现。逐字引用场景下后者才是对的——prompt 要求的就是原文照抄。
-    """
-    return _WS_RE.sub(" ", text.translate(_TYPOGRAPHY)).strip().lower()
-
-
-def _contains_gold(answer: str, gold: str) -> bool:
-    """gold span 是否**逐字**出现在答案里。
-
-    这条判据的存在理由：prompt 明确要求 "quote the exact sentence(s) that contain
-    the answer"，而 CUAD 的 gold 是从那句话里抽出来的短 span。于是一句 40 词的
-    原文引用 vs 一个 5 词的 span，余弦只有 0.5 左右——**整句里逐字含着 gold，
-    却被判成没命中**。旧尺子惩罚的正是 prompt 要求的行为。
-    """
-    g = _normalize(gold)
-    if len(g) < _MIN_GOLD_CHARS:
-        return False
-    return g in _normalize(answer)
+# 归一化与包含判据搬到了 lex_rag/text_match.py：`gate.py` 也要用同一把尺子，
+# 各写一份必然分叉，而且分叉时没有任何报错（实测门禁那份少折叠空格，把 3 条
+# 正确引用判成没命中）。这里保留旧名字，调用方不用改。
+_normalize = normalize
+_contains_gold = contains_gold
+_MIN_GOLD_CHARS = MIN_GOLD_CHARS
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
