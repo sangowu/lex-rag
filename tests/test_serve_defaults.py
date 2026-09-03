@@ -5,6 +5,8 @@ config.yaml 把 top_k 提到 20 之后 API 仍按 10 检索，而且完全无声
 才看得出来。所以两条：默认 top_k 必须取自配置，generate_k 必须跟随 top_k。
 """
 
+import os
+
 import pytest
 
 from scripts import serve
@@ -57,31 +59,42 @@ def test_zero_is_accepted_as_follow_the_default(cfg_top_k):
 
 # --- 线上跑的必须就是被评测的那条配置 -------------------------------------
 
-def test_served_path_reranks_like_the_benchmarks_do():
+@pytest.fixture
+def cfg(monkeypatch):
+    """真实读一遍 config.yaml——这两条测的就是文件里的值，不能拿假配置替。
+
+    `load_config()` 硬取 `EMBED_API_KEY` / `PG_PASSWORD`，缺了直接 KeyError。
+    本地有 .env 所以看不出来，CI 没有，于是这两条在 CI 上必挂。填哨兵值即可：
+    断言只碰 reranker / retrieval 两段，凭据不参与，也绝不能让测试真去连服务。
+    """
+    from lex_rag.config import load_config
+
+    for key in ("EMBED_API_KEY", "PG_PASSWORD"):
+        if key not in os.environ:            # 本地有 .env 时不覆盖真值
+            monkeypatch.setenv(key, "test-not-a-real-credential")
+    return load_config()
+
+
+def test_served_path_reranks_like_the_benchmarks_do(cfg):
     """`reranker.enabled` 曾是 false，于是线上走在一条从没被评测过的档位上。
 
     各评测脚本都靠 `--reranker` 打开它（`if args.reranker: enabled=True`，只加不减），
     所以文档里**所有**基线数字都是开着 reranker 测的；而 serve.py 从不覆盖这个
     字段，线上就一直不重排。症状和 top_k 那次漂移一样：完全无声，功能照常返回答案。
     """
-    from lex_rag.config import load_config
     from lex_rag.strategy import RetrievalStrategy
 
-    st = RetrievalStrategy.from_config(load_config())
-
-    assert st.rerank is True
+    assert RetrievalStrategy.from_config(cfg).rerank is True
 
 
-def test_candidate_pool_does_not_collapse_to_top_k():
+def test_candidate_pool_does_not_collapse_to_top_k(cfg):
     """不开 rerank 时 `fetch_k` 会塌成 `top_k`——线上连候选都比评测时少。
 
     见 strategy.py: `fetch_k = rerank_top_k if rerank_on else top_k`。
     这一条比上一条更隐蔽：就算哪天有人手工在 serve 里补上重排，候选池也得是 60。
     """
-    from lex_rag.config import load_config
     from lex_rag.strategy import RetrievalStrategy
 
-    cfg = load_config()
     st = RetrievalStrategy.from_config(cfg)
 
     assert st.fetch_k == cfg.retrieval.rerank_top_k
