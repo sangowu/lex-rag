@@ -17,8 +17,6 @@ import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
-
 _spec = importlib.util.spec_from_file_location(
     "eval_generation", Path(__file__).resolve().parents[1] / "scripts" / "eval_generation.py"
 )
@@ -189,7 +187,7 @@ def test_paired_diff_scores_cosine_against_an_old_arm_without_the_field(capsys):
     out = capsys.readouterr().out
 
     # y 在新臂只是被包含判据救回，cosine 没变 → cosine 行应该零翻面
-    line = next(l for l in out.splitlines() if l.strip().startswith("└ 仅 cosine"))
+    line = next(ln for ln in out.splitlines() if ln.strip().startswith("└ 仅 cosine"))
     assert "        0        0    +0" in line
 
 

@@ -20,5 +20,9 @@ jobs:
       - name: Lint
         run: uv run ruff check .
 
+      # if: always() —— lint 失败时**测试仍然要跑**。此前 ruff 挂在前面，
+      # 连续 5 个 PR（#35~#39）的 pytest 在 CI 里一次都没执行过，而 job 只显示
+      # 一个红叉，看不出到底是格式问题还是真的测试挂了。
       - name: Test
+        if: always()
         run: uv run pytest tests/ -v
