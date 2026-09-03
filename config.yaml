@@ -69,6 +69,16 @@ reranker:
   # 这里留 10% 余量。0 = 关闭限速。
   tpm_limit: 450000
 
+# API 边界（scripts/serve.py）。密钥不在这里——走 .env 的 API_KEYS，逗号分隔。
+# API_KEYS 为空 = 不鉴权，只在本机开发时可接受；serve.py 会拒绝
+# "绑非回环地址 + 没有密钥" 这个组合，不让它变成一次静默的公开暴露。
+api:
+  rate_limit_rpm: 60          # 每个调用方每分钟请求数，0 = 不限流
+  # 允许的瞬时突发。60 rpm 意味着每秒补 1 个令牌，UI 上连点几下就会被挡；
+  # 留 10 个突发额度让正常交互不误伤，长期速率仍受 rpm 约束。
+  rate_limit_burst: 10
+  log_requests: true          # 结构化访问日志（一行一个 JSON）
+
 database:
   host: localhost
   port: 5434                   # lex_rag 自己的 docker pgvector（5432 被 rag_demo、5433 被 paralegal 占用）

@@ -8,8 +8,11 @@ Legal RAG 服务：FastAPI（REST API）+ Gradio UI，共享同一 pipeline 实�
 
 端点：
     POST /query          — 单文档或 corpus 问答（支持流式 SSE、Agentic）
-    GET  /health         — 健康检查
+    GET  /health         — 健康检查（不需要密钥，否则健康检查永远失败）
     GET  /ui             — Gradio 问答界面（--no-ui 时不可用）
+
+安全边界见 `lex_rag/api_safety.py`：`.env` 里配了 `API_KEYS` 就要求
+`X-API-Key`，按调用方限流，每个请求一行 JSON 访问日志。
 """
 from __future__ import annotations
 
@@ -17,7 +20,9 @@ import argparse
 import asyncio
 import contextvars
 import json
+import logging
 import shutil
+import sys
 from pathlib import Path
 
 import uvicorn
@@ -26,6 +31,10 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from lex_rag._shared import get_generator, get_pipeline
+from lex_rag.api_safety import (
+    ApiKeyRegistry, ApiSafetyMiddleware, RateLimiter,
+    bind_log_fields, configure_logging, current_request_id, is_loopback,
+)
 from lex_rag.generator import GenerationResult
 from lex_rag import tracing
 
@@ -227,12 +236,33 @@ async def root():
 @app.post("/query", response_model=QueryResponse)
 async def query_endpoint(req: QueryRequest):
     if req.stream:
+        bind_log_fields(
+            doc_id=req.doc_id, top_k=req.resolved_top_k(),
+            generate_k=req.resolved_generate_k(), agentic=req.agentic, stream=True,
+            question_chars=len(req.question),
+        )
         return StreamingResponse(_stream_query(req), media_type="text/event-stream")
     try:
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, _run_query, req)
+        resp = await loop.run_in_executor(None, _run_query, req)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        # 不把内部异常原文回给调用方——栈里可能带表名、DSN 片段、上游服务的
+        # 报错正文。调用方拿 request_id 来对，细节留在服务端日志里。
+        bind_log_fields(error=type(e).__name__, error_detail=str(e)[:300])
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "internal_error", "request_id": current_request_id()},
+        )
+    # ⚠️ 在协程里绑定，不能在 _run_query 里——它跑在 executor 线程上，
+    # contextvar 不跨线程传，写进去会被静默丢掉。
+    bind_log_fields(
+        doc_id=req.doc_id, top_k=req.resolved_top_k(),
+        generate_k=req.resolved_generate_k(), agentic=req.agentic, stream=False,
+        question_chars=len(req.question),      # 只记长度：请求体里是合同原文
+        refused=resp.refused, n_citations=len(resp.citations),
+        rounds=len(resp.query_trace),
+    )
+    return resp
 
 
 # ---------------------------------------------------------------------------
@@ -475,6 +505,48 @@ class RootPathMiddleware:
 
 
 # ---------------------------------------------------------------------------
+# 安全边界的组装与启动检查
+# ---------------------------------------------------------------------------
+
+def wrap_with_safety(asgi_app, cfg, keys: ApiKeyRegistry | None = None):
+    """给 ASGI app 套上鉴权 / 限流 / 访问日志。"""
+    keys = keys if keys is not None else ApiKeyRegistry.from_env()
+    return ApiSafetyMiddleware(
+        asgi_app,
+        keys=keys,
+        limiter=RateLimiter(cfg.api.rate_limit_rpm, cfg.api.rate_limit_burst),
+        logger=configure_logging() if cfg.api.log_requests else logging.getLogger("lex_rag.api.off"),
+    )
+
+
+def bind_safety_error(host: str, *, auth_enabled: bool, ui_mounted: bool,
+                      allow_public_ui: bool) -> str | None:
+    """绑定地址与安全配置的组合有问题时返回错误信息，否则 None。
+
+    **失败要吵，不要默默降级。** 这个仓库已经有三次"配置变了、读它的一侧没跟上，
+    而且完全无声"的事故。"绑 0.0.0.0 但没配密钥"属于同一类：功能完全正常，
+    只是全世界都能问你的合同库。所以这里直接拒绝启动，而不是打条警告。
+    """
+    if is_loopback(host):
+        return None
+    if not auth_enabled:
+        return "\n".join([
+            f"拒绝启动：--host {host} 不是回环地址，但 .env 里没有 API_KEYS，"
+            f"/query 将对外完全开放。",
+            "  要么配密钥：在 .env 里写 API_KEYS=<key1>,<key2>",
+            "  要么绑回环：--host 127.0.0.1",
+        ])
+    if ui_mounted and not allow_public_ui:
+        return "\n".join([
+            f"拒绝启动：--host {host} 不是回环地址，而 Gradio UI 无法携带 "
+            f"X-API-Key，/ui 只能靠网络位置保护。",
+            "  仅提供 API：--no-ui",
+            "  或明确接受这个风险（例如已在 ALB / VPN 后面）：--allow-public-ui",
+        ])
+    return None
+
+
+# ---------------------------------------------------------------------------
 # 入口
 # ---------------------------------------------------------------------------
 
@@ -484,19 +556,35 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=6800)
     parser.add_argument("--no-ui", action="store_true", help="不挂载 Gradio UI，仅提供 API")
     parser.add_argument("--root-path", default="", help="子路径部署时的前缀（如 ALB 路径路由 /legal-rag）")
+    parser.add_argument("--allow-public-ui", action="store_true",
+                        help="允许在非回环地址上挂载无鉴权的 Gradio UI（UI 发不出 X-API-Key）")
     args = parser.parse_args()
 
     # 启动即加载 .env（含 LANGFUSE_*），确保首个请求的 trace_span 之前 env 已就位，
     # 否则首次 tracing 调用早于请求内的 load_dotenv，会误判为未配置。
     from lex_rag.config import load_config
-    load_config()
+    cfg = load_config()
+
+    keys = ApiKeyRegistry.from_env()
+    err = bind_safety_error(args.host, auth_enabled=keys.enabled,
+                            ui_mounted=not args.no_ui,
+                            allow_public_ui=args.allow_public_ui)
+    if err:
+        sys.exit(err)
 
     if not args.no_ui:
         import gradio as gr
         demo = build_ui()
-        app_with_ui = gr.mount_gradio_app(app, demo, path="/ui")
-        target = RootPathMiddleware(app_with_ui, args.root_path)
-        uvicorn.run(target, host=args.host, port=args.port, timeout_graceful_shutdown=3)
+        inner = gr.mount_gradio_app(app, demo, path="/ui")
     else:
-        target = RootPathMiddleware(app, args.root_path)
-        uvicorn.run(target, host=args.host, port=args.port, timeout_graceful_shutdown=3)
+        inner = app
+
+    print(f"[serve] auth={'on' if keys.enabled else 'OFF (no API_KEYS)'} "
+          f"keys={len(keys.keys)} rate_limit={cfg.api.rate_limit_rpm}/min "
+          f"burst={cfg.api.rate_limit_burst} ui={'off' if args.no_ui else 'on'}",
+          file=sys.stderr)
+
+    # 顺序要紧：RootPathMiddleware 在最外层先剥掉部署前缀，安全层才能按
+    # 真实路径判断豁免（否则 /legal-rag/health 匹配不上 /health）。
+    target = RootPathMiddleware(wrap_with_safety(inner, cfg, keys), args.root_path)
+    uvicorn.run(target, host=args.host, port=args.port, timeout_graceful_shutdown=3)
