@@ -763,6 +763,23 @@ FP 0.060→0.047、FN 0.120→0.100，**McNemar 全部落在噪声里**，cosine
 `422×10, 429×3`（`Retry-After: 1`），第二个 key 不受影响；入站 `X-Request-ID`
 被原样沿用。日志里 `grep sk-smoke` 命中 0 条。
 
+## CI 的两个 workflow
+
+- **`test.yml`（ruff + pytest）是唯一该看的门禁。** Test 步骤带 `if: always()`：
+  lint 是格式问题，不该决定测试跑不跑。原来 Lint 排在前面且没有这一行，
+  **#35~#39 连续 5 个 PR 的 pytest 在 CI 里一次都没执行过**，只显示一个红叉。
+- **`deploy.yml` 曾经每次推 master 都失败**（挂在 Configure AWS credentials）——
+  ECS 集群为省钱手动下线了，仓库里也没有 AWS 凭据。现在改成：
+  没凭据时 `preflight` 说明原因并跳过部署（整轮绿），
+  **`workflow_dispatch` 手动触发时则明确失败**——那种情况下是特意要求部署的，
+  静默跳过才是错的。恢复部署要配好 secrets 并把 `ECS_CLUSTER` / `ECS_SERVICE`
+  从占位名改成 Terraform 实建的名字；deploy job 里加了一步先
+  `describe-services` 验证目标存在**再构建**，免得配好凭据却忘了改名字时，
+  要等镜像推完 ECR 才在最后一步失败。
+
+> ⚠️ **一个长期红的 workflow 会把人训练成不看红叉，真正的失败就藏在里面。**
+> 上面两条是同一个教训的两面。红叉必须有意义。
+
 ## 关键约束
 
 - **`reranker.enabled` 必须是 `true`，否则线上跑的不是被评测的那条配置**（2026-08-29 修）。

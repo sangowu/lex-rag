@@ -1,16 +1,22 @@
 name: Build and Deploy
 
-# 触发条件与 test.yml 保持一致（push 到 master）。
 # ECR_REPOSITORY / task family 名与 infra/variables.tf 的 service_name 默认值
 # （legal-rag-v1）保持一致，CONTAINER_NAME 与 deploy/task-definition.json 里
 # containerDefinitions[0].name 一致。
 #
-# 注意：ECS_CLUSTER / ECS_SERVICE 当前是占位名——集群和服务已被手动下线以节省
-# AWS 费用，重新用 Terraform（infra/）建好集群和 service 后，把这两个改成真实
-# 名字（或在仓库 Settings → Variables 里覆盖），这个 workflow 才能真正跑通。
+# ⚠️ 集群与服务已被手动下线以节省 AWS 费用，仓库里也没有 AWS 凭据。
+# 这个 workflow 曾因此在**每一次推送 master 时都失败**（挂在 Configure AWS
+# credentials）。一个长期红的 workflow 会把人训练成不看红叉，然后真正的失败就藏
+# 在里面——#40 那次 lint 挡住 pytest、连红 5 个 PR 没人发现，就是这么来的。
+#
+# 所以现在：没有凭据时 preflight 说明原因并**跳过**部署（整轮显示成功），
+# 手动触发时则**明确失败**——那种情况下你是特意要求部署的，静默跳过才是错的。
+# 恢复部署要做两件事：仓库 Settings 里配 AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY，
+# 并把下面的 ECS_CLUSTER / ECS_SERVICE 改成 Terraform 实际建出来的名字。
 on:
   push:
     branches: [master]
+  workflow_dispatch:
 
 env:
   AWS_REGION: eu-west-1
@@ -20,8 +26,36 @@ env:
   CONTAINER_NAME: legal-rag-v1
 
 jobs:
+  preflight:
+    name: Can we deploy?
+    runs-on: ubuntu-latest
+    outputs:
+      ready: ${{ steps.check.outputs.ready }}
+    steps:
+      # secrets 不能直接写在 job 级的 if: 里，所以在步骤里读成 env 再传出 output。
+      - id: check
+        env:
+          AWS_KEY: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        run: |
+          if [ -n "$AWS_KEY" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+            echo "AWS credentials present - deploying."
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Deploy skipped::No AWS_ACCESS_KEY_ID secret. The ECS cluster is offline to save cost; see the comment at the top of deploy.yml."
+          fi
+
+      # 手动触发 = 明确要求部署。这时缺凭据必须报错，不能安静地跳过。
+      - name: A manual dispatch that cannot deploy is an error
+        if: github.event_name == 'workflow_dispatch' && steps.check.outputs.ready != 'true'
+        run: |
+          echo "::error title=Cannot deploy::workflow_dispatch was requested but AWS_ACCESS_KEY_ID is not set. Configure the repository secrets first."
+          exit 1
+
   deploy:
     name: Build, Push, Deploy
+    needs: preflight
+    if: needs.preflight.outputs.ready == 'true'
     runs-on: ubuntu-latest
 
     steps:
@@ -34,6 +68,19 @@ jobs:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
+
+      # 先确认目标存在，再构建。ECS_CLUSTER / ECS_SERVICE 是占位名，配好凭据却忘了
+      # 改名字的话，原来要等到最后一步才失败——那时镜像已经构建并推上 ECR 了。
+      - name: Verify the ECS service exists before building anything
+        run: |
+          COUNT=$(aws ecs describe-services \
+            --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" \
+            --region "$AWS_REGION" \
+            --query 'length(services[?status==`ACTIVE`])' --output text 2>/dev/null || echo 0)
+          if [ "$COUNT" != "1" ]; then
+            echo "::error title=No such ECS service::$ECS_CLUSTER/$ECS_SERVICE is not an ACTIVE service. Update ECS_CLUSTER / ECS_SERVICE in deploy.yml to the names Terraform actually created."
+            exit 1
+          fi
 
       - name: Login to Amazon ECR
         id: login-ecr
