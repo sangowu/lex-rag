@@ -63,7 +63,7 @@ def test_paired_counts_only_discordant_pairs(capsys):
     eg._print_paired_diff(a, b)
     out = capsys.readouterr().out
 
-    line = next(l for l in out.splitlines() if "semantic_hit" in l)
+    line = next(ln for ln in out.splitlines() if "semantic_hit" in ln)
     # 只有 y 翻了面，方向对 B 有利
     assert "        1        0    +1" in line
 
@@ -86,7 +86,7 @@ def test_false_positive_is_scored_on_the_no_answer_subset(capsys):
     out = capsys.readouterr().out
 
     assert "有答案 1 / 无答案 1" in out
-    line = next(l for l in out.splitlines() if "false_positive" in l)
+    line = next(ln for ln in out.splitlines() if "false_positive" in ln)
     assert "        1        0    +1" in line  # B 少编造了一次，算 B 好
 
 
