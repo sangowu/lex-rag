@@ -73,14 +73,18 @@ uv run scripts/ingest_ocr.py --input-dir data/scanned_docs --table chunks_ocr --
 ## 本地运行（模型服务）
 
 > **模型接入现状**：embedding 与 reranker 已切到 **SiliconFlow**（托管，无需本地 GPU）；
-> 原先的两个本地 llama.cpp 实例（:8081 / :6006）已移除。生成 / Judge 已从 Gemini 迁到 **Z.ai GLM**。
+> 原先的两个本地 llama.cpp 实例（:8081 / :6006）已移除。生成 / Judge 从 Gemini 迁到 **Z.ai GLM**，
+> 之后又迁到 **DashScope 通义千问**（`config.yaml` 的 `contextual` / `ragas` 两节是唯一真相）。
+> ⚠️ 这张表曾停在 GLM 那一档没跟着改，而 v5 结果表里写的是 `qwen3.7-flash`——同一份文档
+> 自相矛盾了一段时间。改服务商时**这张表和 README 的 Tech stack 都要跟着动**。
 
 | 用途 | 服务商 | 模型 | base_url | key |
 |------|--------|------|----------|-----|
 | embedding | SiliconFlow | `BAAI/bge-m3`（1024 维） | `https://api.siliconflow.cn/v1` | `EMBED_API_KEY` |
 | reranker | SiliconFlow | `BAAI/bge-reranker-v2-m3` | 同上（自动拼 `/v1/rerank`） | `RERANK_API_KEY`（缺省回落 `EMBED_API_KEY`） |
 | OCR | MinerU 在线 API | — | `https://mineru.net/api/v4` | `MINERU_API_TOKEN` |
-| 生成 / Judge / 辅助 LLM | Z.ai | `glm-4.7-flash` | `https://api.z.ai/api/paas/v4/` | `GENERATE_MODEL_API` |
+| 生成 / 辅助 LLM | DashScope | `qwen3.7-flash`（`thinking: false`） | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `GENERATE_MODEL_API` |
+| 评测 Judge | DashScope | `qwen3.7-plus`（刻意与生成层不同，避免自评偏袒） | 同上 | `GENERATE_MODEL_API` |
 
 **启动顺序：先起向量库与模型服务，再跑 ingest / eval：**
 ```bash
