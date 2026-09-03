@@ -16,27 +16,19 @@ Built end-to-end on the [CUAD](https://www.atticusprojectai.org/cuad) contract-u
 
 ## Demo
 
-Two questions against the **same** contract (`LIMEENERGYCO_09_09_1999-EX-10-DISTRIBUTOR AGREEMENT`), copied verbatim out of evaluation run [`20260829T111207Z`](data/runs/gen_eval/20260829T111207Z.json) — these are recorded system outputs, not hand-written illustrations.
+Two questions against the **same** contract (`LIMEENERGYCO_09_09_1999-EX-10-DISTRIBUTOR AGREEMENT`) in the Gradio UI at `/ui`. Real screenshots of the running system, not mock-ups.
 
-**① The contract answers it → verbatim quote with a citation**
+**① The contract answers it → a verbatim quote, with the source it came from**
 
-> **Q** — *Highlight the parts (if any) of this contract related to "Renewal Term"… What is the renewal term after the initial term expires?*
->
-> **A** — "If Distributor complies with all of the terms of this Agreement, the Agreement shall be renewable on an annual basis for one (1) year terms for up to another ten (10) years on the same terms and conditions as set forth herein." **[2]**
->
-> `refused: false` · cosine vs. gold **0.97** · 1 800 ms · 6 954 prompt + 65 completion tokens
+![Grounded answer with a citation](docs/images/ui-answer.png)
 
-**② The contract is silent → explicit refusal, nothing invented**
+The citation panel names the chunk, gives its character offsets in the original document (`5108–6037`), and shows the passage the quote was taken from — so the answer can be checked against the contract without leaving the page.
 
-> **Q** — *…related to "Most Favored Nation"… Is there a clause that if a third party gets better terms on the licensing or sale of technology…?*
->
-> **A** — *(empty)*
->
-> `refused: true` · 1 070 ms · 15 completion tokens
+**② The contract is silent → an explicit refusal, nothing invented**
 
-The second case is the one that matters here. The model emits `{"refused": true}` as a **structured field** rather than hedging in prose, so "didn't answer" and "answered wrong" stay separable all the way into the metrics. Over 200 questions (50 answerable, 150 not): **false-answer 0.060** — 9 of the 150 unanswerable questions still got an answer, which is the remaining hallucination surface — and **false-refusal 0.120**.
+![Explicit refusal](docs/images/ui-refusal.png)
 
-> _Gradio UI screenshot still to be added; `/ui` renders these same two paths._
+The second case is the one that matters here. The model emits `{"refused": true}` as a **structured field** rather than hedging in prose, so "didn't answer" and "answered wrong" stay separable all the way into the metrics. Over 200 questions (50 answerable, 150 not): **false-answer 0.047** — 7 of the 150 unanswerable questions still got an answer, which is the remaining hallucination surface — and **false-refusal 0.100**.
 
 ---
 
@@ -112,9 +104,10 @@ Headline metric is the **semantic-hit rate** (does the answer actually deliver t
 | v3 verbatim-quote constraint | Gemini | 0.760 | — | 0.100 | — |
 | v4 + `doc_meta` injection | Gemini | 0.820 | 0.200 | **0.040** | 756 ms |
 | v5 provider migration, `thinking=on` | GLM-4.7-Flash | 0.800 | 0.120 | 0.060 | 7 774 ms |
-| **current** — `thinking=off`, `top_k=20` | **Qwen3.7-Flash** | **0.880**¹ | **0.060** | 0.120 | 1 579 ms |
+| v6 `thinking=off`, `top_k=20` | Qwen3.7-Flash | 0.880¹ | 0.060 | 0.120 | 1 579 ms |
+| **current** — v6 + injection defence | **Qwen3.7-Flash** | **0.900**¹ | **0.047** | **0.100** | 1 992 ms |
 
-¹ **The ruler changed with the last row, so read that cell carefully.** v1–v5 scored a hit as *whole-answer vs. whole-gold cosine ≥ 0.70*, which systematically punished the behaviour the prompt demands: the generator is told to *quote the exact sentence(s)*, while CUAD golds are short spans cut out of those sentences — a 40-word quote containing the gold **verbatim** scores ~0.5. The criterion is now *verbatim containment **or** cosine*. Under the old cosine-only ruler the current row is **0.780**; both numbers are stored in every run file. The acceptance test for that change was not the +0.080 — it was that the *unchanged* cosine column stayed put under paired comparison (net −1 of 200, p = 1.000).
+¹ **The ruler changed at v6, so read those two cells carefully.** v1–v5 scored a hit as *whole-answer vs. whole-gold cosine ≥ 0.70*, which systematically punished the behaviour the prompt demands: the generator is told to *quote the exact sentence(s)*, while CUAD golds are short spans cut out of those sentences — a 40-word quote containing the gold **verbatim** scores ~0.5. The criterion is now *verbatim containment **or** cosine*. Under the old cosine-only ruler both v6 and the current row are **0.780**; both numbers are stored in every run file. The acceptance test for that change was not the +0.080 — it was that the *unchanged* cosine column stayed put under paired comparison (net −1 of 200, p = 1.000).
 
 Two results worth more than the table:
 

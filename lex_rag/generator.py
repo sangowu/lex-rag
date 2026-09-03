@@ -112,13 +112,68 @@ _MULTI_DOC_NOTE = """\
 - Excerpts come from MULTIPLE contracts; cite each quote with [N] AND mention the contract name inline, e.g. "quote" [1] (CONTRACT_NAME)\
 """
 
+# --- 引用片段 -------------------------------------------------------------
+
+_QUOTED_RE = re.compile(r'"([^"]{20,})"')
+_EXCERPT_CHARS = 200
+_LEAD_CHARS = 40
+
+
+def _locate_quote(chunk_text: str, quote: str) -> int:
+    """在 chunk 原文里找这段引用的起点，找不到返回 -1。
+
+    按**词**拼一个允许任意空白的正则，而不是直接 `str.find`：CUAD 的原文来自 SEC
+    的等宽排版，句中常有成串空格与换行，模型引用时会把它们规整成单空格，逐字查找
+    必然落空。
+    """
+    words = quote.split()[:8]
+    if len(words) < 3:
+        return -1
+    pattern = r"\s+".join(re.escape(w) for w in words)
+    m = re.search(pattern, chunk_text, re.IGNORECASE)
+    return m.start() if m else -1
+
+
+def _snap(text: str, i: int, forward: bool) -> int:
+    """把下标挪到最近的词边界，免得片段从半个单词开始或结束。"""
+    if forward:
+        while i < len(text) and not text[i].isspace():
+            i += 1
+    else:
+        while 0 < i < len(text) and not text[i - 1].isspace():
+            i -= 1
+    return i
+
+
+def _excerpt_for(chunk_text: str, answer: str) -> str:
+    """给一条引用挑展示片段：优先截取**答案引用的那句话**周围的窗口。
+
+    原来是 `chunk.text[:120]`——chunk 开头 120 字。它几乎从不是被引用的那句话，
+    而且 chunk 是按字符切的，片段常常从半个单词开始（实测 UI 上显示成
+    "ment, may be executed for each state..."）。引用看起来就像引错了，
+    而实际上 chunk 是对的、只是预览取错了地方。
+    """
+    for quote in _QUOTED_RE.findall(answer):
+        i = _locate_quote(chunk_text, quote)
+        if i >= 0:
+            lo = _snap(chunk_text, max(0, i - _LEAD_CHARS), forward=False)
+            hi = _snap(chunk_text, min(len(chunk_text), lo + _EXCERPT_CHARS), forward=True)
+            out = chunk_text[lo:hi].strip()
+            return ("…" if lo > 0 else "") + out + ("…" if hi < len(chunk_text) else "")
+
+    # 定位不到就退回开头，但仍然对齐到词边界
+    hi = _snap(chunk_text, min(len(chunk_text), 120), forward=True)
+    out = chunk_text[:hi].strip()
+    return out + ("…" if hi < len(chunk_text) else "")
+
+
 @dataclass
 class Citation:
     doc_id: str
     chunk_id: str
     start: int | None
     end: int | None
-    excerpt: str          # chunk 文本前 120 字，方便展示
+    excerpt: str          # 展示用片段：答案所引那句话周围的窗口，见 _excerpt_for
     num: int = 0          # 模型在答案中使用的引用编号 [N]
 
 
@@ -207,7 +262,8 @@ class LegalGenerator:
                 chunk = chunks[idx]
                 citations.append(Citation(
                     doc_id=chunk.doc_id, chunk_id=chunk.chunk_id,
-                    start=chunk.start, end=chunk.end, excerpt=chunk.text[:120],
+                    start=chunk.start, end=chunk.end,
+                    excerpt=_excerpt_for(chunk.text, answer),
                     num=num,
                 ))
 
@@ -222,7 +278,8 @@ class LegalGenerator:
                     chunk = chunk_by_doc[doc_id]
                     citations.append(Citation(
                         doc_id=chunk.doc_id, chunk_id=chunk.chunk_id,
-                        start=chunk.start, end=chunk.end, excerpt=chunk.text[:120],
+                        start=chunk.start, end=chunk.end,
+                    excerpt=_excerpt_for(chunk.text, answer),
                     ))
 
         return answer, False, citations
