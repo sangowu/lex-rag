@@ -98,6 +98,15 @@ class RagasConfig:
     thinking: bool | None = None
 
 @dataclass
+class ApiConfig:
+    """`serve.py` 的 API 边界参数。密钥本身不在这里——它走 .env 的 `API_KEYS`，
+    和其它凭据一样不进 config.yaml。"""
+    rate_limit_rpm: int = 60      # 每个调用方每分钟请求数，0 = 不限流
+    rate_limit_burst: int = 10    # 允许的瞬时突发；0 = 取 rate_limit_rpm
+    log_requests: bool = True     # 结构化访问日志（JSON 行）
+
+
+@dataclass
 class AppConfig:
     embedding: EmbeddingConfig
     database: DatabaseConfig
@@ -108,6 +117,7 @@ class AppConfig:
     contextual: ContextualConfig
     parent_child: ParentChildConfig = field(default_factory=ParentChildConfig)
     ragas: RagasConfig = field(default_factory=RagasConfig)
+    api: ApiConfig = field(default_factory=ApiConfig)
     hyde_enabled: bool = False
     multi_query_enabled: bool = False
     multi_query_n: int = 3        # 含原始问题在内的总查询数
@@ -221,6 +231,13 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         thinking=rg.get("thinking", None),
     )
 
+    ap = config_dict.get("api", {})
+    api_config = ApiConfig(
+        rate_limit_rpm=ap.get("rate_limit_rpm", 60),
+        rate_limit_burst=ap.get("rate_limit_burst", 10),
+        log_requests=ap.get("log_requests", True),
+    )
+
     return AppConfig(
         embedding=embedding_config,
         database=database_config,
@@ -231,6 +248,7 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         contextual=contextual_config,
         parent_child=parent_child_config,
         ragas=ragas_config,
+        api=api_config,
         hyde_enabled=hyde_enabled,
         multi_query_enabled=multi_query_enabled,
         multi_query_n=multi_query_n,

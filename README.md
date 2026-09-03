@@ -164,6 +164,7 @@ exposes `model_version` instead of `backend`, so the baseline needs a re-run to 
 2. **An embedding endpoint and a reranker endpoint** — both ship pointed at [SiliconFlow](https://siliconflow.cn) (`BAAI/bge-m3` + `BAAI/bge-reranker-v2-m3`), so all you need is `EMBED_API_KEY` in `.env`. To use a different provider, change `embedding.base_url` / `reranker.base_url` in `config.yaml`; the embedding side expects an OpenAI-compatible `/v1/embeddings`. For a self-hosted GPU behind SSH, set `provider: ssh_tunnel` and the app opens the port-forward for you.
 3. **A DashScope API key** (`GENERATE_MODEL_API`) — used for generation, judging, and the optional Contextual-RAG / HyDE / agentic features. Any OpenAI-compatible chat endpoint works: change `contextual.base_url` / `contextual.model` in `config.yaml`.
 4. **A MinerU API token** (`MINERU_API_TOKEN`) — only for the OCR scripts; create one at [mineru.net/apiManage](https://mineru.net/apiManage).
+5. **API keys** (`API_KEYS`, comma-separated) — optional on localhost, **required to bind a non-loopback address**. See [API safety](#api-safety) below.
 
 ### Install
 
@@ -199,6 +200,7 @@ uv run scripts/serve.py --no-ui    # REST API only
 ```bash
 curl -s http://127.0.0.1:6800/query \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: $LEGAL_RAG_KEY" \
   -d '{"question": "What is the governing law of this contract?",
        "doc_id": null,
        "top_k": 20,
@@ -218,7 +220,7 @@ curl -s http://127.0.0.1:6800/query \
 }
 ```
 
-`top_k` and `generate_k` both default to the value in `config.yaml` (currently 20); `generate_k: 0` means *follow `top_k`*. Set `"stream": true` for token-by-token SSE, or `"agentic": true` for the sufficiency-judge loop, which re-retrieves with a different strategy when the first pass is judged insufficient.
+Every response carries an `X-Request-ID` header — echoed from the request when you send one — which is the join key into the access log. `top_k` and `generate_k` both default to the value in `config.yaml` (currently 20); `generate_k: 0` means *follow `top_k`*. Set `"stream": true` for token-by-token SSE, or `"agentic": true` for the sufficiency-judge loop, which re-retrieves with a different strategy when the first pass is judged insufficient.
 
 ### CLI
 
@@ -237,6 +239,34 @@ uv run scripts/eval_generation.py --limit 200 --reranker \
 uv run scripts/grid_search.py --reranker                       # hyperparameter sweep
 ```
 
+### API safety
+
+`POST /query` sits behind an auth + rate-limit + structured-logging layer (`lex_rag/api_safety.py`):
+
+| | Behaviour |
+|---|---|
+| **Auth** | `X-API-Key: <key>` or `Authorization: Bearer <key>`, checked against `API_KEYS` in `.env` with `secrets.compare_digest`. Unset means auth is disabled. |
+| **Rate limit** | Per-key token bucket, `api.rate_limit_rpm` / `api.rate_limit_burst` in `config.yaml`. Over budget returns `429` with `Retry-After`. Falls back to per-IP when auth is off. |
+| **Logging** | One JSON line per request: `request_id`, method, path, status, `latency_ms`, `key_id`, `doc_id`, `top_k`, `refused`, `n_citations`, `rounds`. |
+| **Exempt** | `/health` (health checks cannot carry a key) and `/ui` (browsers cannot send custom headers). |
+
+Two decisions worth stating outright:
+
+- **The server refuses to start rather than silently expose itself.** `--host 0.0.0.0` with no `API_KEYS` exits with an error instead of booting wide open; so does a non-loopback bind with the Gradio UI mounted, unless you pass `--allow-public-ui`. This repo has had three separate "a value moved in the config, its reader did not, and nothing complained" incidents. An accidentally public contract corpus is the same failure mode with a far worse blast radius, so this one is made loud.
+- **The question and the answer never reach the log.** The request body of this service *is* legal text. The log keeps `question_chars`, never the question; and `key_id` = `sha256(key)[:8]`, never the key. Reconstructing a request means joining on `request_id`, not reading stored content.
+
+```bash
+# Generate a key
+python -c "import secrets; print('sk-' + secrets.token_urlsafe(32))"
+```
+
+```jsonc
+// one access-log line, exactly as emitted
+{"auth":"enabled","client":"127.0.0.1","event":"request","key_id":"ceae92de",
+ "latency_ms":0.1,"method":"POST","path":"/query","refused":false,
+ "request_id":"5f1ddf95c3094d3b","status":200}
+```
+
 ---
 
 ## Configuration highlights (`config.yaml`)
@@ -244,6 +274,7 @@ uv run scripts/grid_search.py --reranker                       # hyperparameter 
 Every retrieval/generation strategy is a toggle, which is what makes the ablation studies possible:
 
 ```yaml
+api:         { rate_limit_rpm: 60, rate_limit_burst: 10, log_requests: true }
 retrieval:   { mode: hybrid, top_k: 20, rerank_top_k: 60 }   # vector | bm25 | hybrid
 reranker:    { enabled: true, model: BAAI/bge-reranker-v2-m3, tpm_limit: 450000 }
 contextual:  { enabled: false, model: qwen3.7-flash, thinking: false }  # generation + Contextual RAG
@@ -272,6 +303,7 @@ lex-rag/
 │   ├── sufficiency.py       # the judge: "is this enough to answer?" + what is missing
 │   ├── trace_sink.py        # per-round JSONL experiment corpus (fsync'd line by line)
 │   ├── tracing.py           # Langfuse wrapper — a complete no-op when unconfigured
+│   ├── api_safety.py        # API-key auth, per-caller rate limiting, JSON access log
 │   ├── evals.py             # retrieval metric computation
 │   └── config.py            # dataclass config, YAML + .env loader
 ├── scripts/                 # ingest / serve / eval / grid-search / OCR entrypoints
@@ -306,7 +338,7 @@ Honest next steps to take this from "strong portfolio project" to "deployable se
 - [x] `docker-compose` (Postgres + pgvector) for one-command reproducibility.
 - [x] CI (GitHub Actions: `ruff` + `pytest`).
 - [x] Wire the OCR pipeline's output directly into the RAG ingest path end-to-end (`scripts/ingest_ocr.py`).
-- [ ] **API auth / rate-limiting / structured request logging** — `POST /query` is currently unauthenticated and has no `request_id` in its logs. The next piece of work.
+- [x] **API auth / rate-limiting / structured request logging** — see [API safety](#api-safety).
 - [ ] **An end-to-end OCR→RAG demo doc** — the code path exists; the two-minute narrated version of it does not.
 - [ ] **Release gates** — a 10–20 case regression set (answerable / unanswerable / metadata-dependent / prompt-injection) with a false-answer threshold that blocks a merge.
 
