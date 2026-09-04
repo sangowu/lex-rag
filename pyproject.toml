@@ -16,6 +16,10 @@ dependencies = [
     "pgvector>=0.2",         # pgvector Python client
     "tqdm>=4.66",            # progress bars
     "numpy>=1.26",           # vector ops
+    # OCR 评测的 CER/WER。此前只写在 CLAUDE.md 里让人手装，于是 eval_ocr.py /
+    # 端到端 demo 在干净环境里第一步就 ModuleNotFoundError。
+    "editdistance>=0.8",     # OCR CER/WER
+    "pillow>=10.0",          # 合成扫描件渲染（scripts/make_scanned_demo.py）
     "ragas>=0.4.3",
     "fastapi>=0.115",             # REST API (scripts/serve.py)
     "uvicorn[standard]>=0.34",   # ASGI server (scripts/serve.py)

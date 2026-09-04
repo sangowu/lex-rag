@@ -300,14 +300,33 @@ def _error_kind(err: str) -> str:
     return type(err).__name__ if isinstance(err, Exception) else e[:60]
 
 
-def run_eval(args) -> None:
-    cfg = load_config()
+def apply_cli_overrides(cfg, args):
+    """把命令行参数覆盖到 config 上，返回新的 cfg（不改文件）。
+
+    **单独抽出来是为了能被 CI 钉住。** `--table` 曾经只被声明、从没被读过：参数在，
+    应用它的那一行不在，于是 `--table chunks_ocr` 被静默忽略——评测照样跑完、照样
+    出一份漂亮结果，只不过跑的是默认表。抓住它的唯一线索是 provenance 里老实写着
+    `table: chunks`，以及两臂的 avg_tokens 一个字节都不差。
+
+    这是本仓库第五次栽在"配置变了、读它的人没跟着变、而且完全无声"上（前四次：
+    serve.py 写死 top_k、reranker.enabled、eval.py 写死 hit@k、门禁自带的第二份
+    归一化）。前四次都是靠人眼发现的；这一次同样。所以判据不能是"跑起来不报错"，
+    得是"覆盖之后 cfg 里那个字段真的变了"——`tests/test_eval_generation_args.py`
+    对每一个开关各钉一条。
+    """
+    if args.table:
+        cfg = replace(cfg, database=replace(cfg.database, table=args.table))
     if args.reranker:
         cfg = replace(cfg, reranker=replace(cfg.reranker, enabled=True))
     # thinking 做 A/B 时必须能从命令行切，不能靠两次运行之间改 config.yaml——
     # 改文件的做法既不可复现，又容易把别的字段一起带进去，单变量就不成立了。
     if args.thinking is not None:
         cfg = replace(cfg, contextual=replace(cfg.contextual, thinking=args.thinking))
+    return cfg
+
+
+def run_eval(args) -> None:
+    cfg = apply_cli_overrides(load_config(), args)
     pipeline = RAGPipeline(cfg)
     generator = LegalGenerator(cfg.contextual)
 

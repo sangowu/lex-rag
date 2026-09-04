@@ -16,6 +16,9 @@ build/
 # Data (large files & downloaded datasets)
 data/cuad_docs/
 data/legalbench_docs/
+# 合成扫描件：2MB 的二进制，且由 make_scanned_demo.py 的固定种子完全可复现，
+# 进库只会让 clone 变大。
+data/scanned_docs/
 data/runs/
 data/omnidocbench_annotations.json
 data/embed_cache*.pkl
