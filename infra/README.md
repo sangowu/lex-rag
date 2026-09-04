@@ -11,6 +11,18 @@
 | IAM roles / SSM 参数 | `data.*` | 只读引用，Terraform 不管理其生命周期 |
 
 **尚未纳管**（后续分批接入）：ECS Service、ALB + Target Group、RDS、EC2 GPU 实例、ECR、安全组、VPC。
+
+> ⚠️ **恢复部署前必须先建 `/legal-rag-v1/api-keys`（SecureString）。**
+> `serve.py` 在非回环地址上**没有 `API_KEYS` 就拒绝启动**，任务定义里少了它，
+> 症状是容器起来立刻退出、ECS 不停重启，看起来像镜像坏了。
+> 而且 `data.aws_ssm_parameter.runtime` 是 `for_each` 遍历 `local.runtime_secrets` 的，
+> **参数不存在时 `terraform plan` 直接 ParameterNotFound**，走不到 apply。
+>
+> 任务定义同时加了 `--no-ui`：`/ui` 是鉴权豁免路径（浏览器发不出自定义头），
+> 公网挂着它等于把整个合同库开给全世界，而且**功能完全正常、不会有任何报错**。
+>
+> 两条都由 `tests/test_deploy_config.py` 钉住——它把任务定义喂给 `serve.py` 自己的
+> `bind_safety_error()`，判据和线上是同一个函数。
 分批的原因见下面「为什么不一次全写」。
 
 ## 首次接入（已完成，记录备查）

@@ -10,7 +10,7 @@
     {
       "name": "legal-rag-v1",
       "image": "569260897196.dkr.ecr.eu-west-1.amazonaws.com/legal-rag-v1:latest",
-      "command": ["python", "scripts/serve.py", "--host", "0.0.0.0", "--port", "6800", "--root-path", "/legal-rag"],
+      "command": ["python", "scripts/serve.py", "--host", "0.0.0.0", "--port", "6800", "--root-path", "/legal-rag", "--no-ui"],
       "portMappings": [
         {"containerPort": 6800, "protocol": "tcp"}
       ],
@@ -19,7 +19,8 @@
         {"name": "PG_PASSWORD", "valueFrom": "arn:aws:ssm:eu-west-1:569260897196:parameter/legal-rag-v1/pg-password"},
         {"name": "EMBED_API_KEY", "valueFrom": "arn:aws:ssm:eu-west-1:569260897196:parameter/legal-rag-v1/embed-api-key"},
         {"name": "RERANK_API_KEY", "valueFrom": "arn:aws:ssm:eu-west-1:569260897196:parameter/legal-rag-v1/rerank-api-key"},
-        {"name": "GENERATE_MODEL_API", "valueFrom": "arn:aws:ssm:eu-west-1:569260897196:parameter/legal-rag-v1/generate-model-api"}
+        {"name": "GENERATE_MODEL_API", "valueFrom": "arn:aws:ssm:eu-west-1:569260897196:parameter/legal-rag-v1/generate-model-api"},
+        {"name": "API_KEYS", "valueFrom": "arn:aws:ssm:eu-west-1:569260897196:parameter/legal-rag-v1/api-keys"}
       ],
       "logConfiguration": {
         "logDriver": "awslogs",
