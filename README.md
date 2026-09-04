@@ -311,31 +311,28 @@ Full write-up in `docs/experiments.md`.
 
 ### OCR → RAG end-to-end
 
-`scripts/ingest_ocr.py` existed but had never been run end to end — `data/scanned_docs` was empty. The blocker was corpus: OmniDocBench has nine document classes and **none of them is a contract**, and a real scanned contract comes with no ground truth, which leaves you with a screenshot instead of a measurement. So the demo renders a CUAD contract *back* into a 6-page scan (monospace, slight skew, defocus, sensor noise), which keeps both the verbatim ground truth and the 41 CUAD question/answer pairs that already exist for that document.
+`scripts/ingest_ocr.py` existed but had never been run end to end. The blocker was corpus: OmniDocBench has nine document classes and **none of them is a contract**, and a real scanned contract comes with no ground truth, which leaves you with a screenshot instead of a measurement. So the demo renders four CUAD contracts *back* into scans (32 pages, monospace, slight skew, defocus, sensor noise), keeping both the verbatim ground truth and the 164 CUAD question/answer pairs that already exist for those documents.
 
-| | Clean text | **OCR text** |
-|---|:---:|:---:|
-| `semantic_hit_rate` | 1.000 | **1.000** |
-| `false_positive_rate` | 0.032 | **0.032** |
-| `false_negative_rate` | 0.000 | **0.000** |
-| chunks | 21 | 19 |
+| | Clean text | **OCR text** | McNemar |
+|---|:---:|:---:|:---:|
+| `semantic_hit_rate` | 0.820 | **0.860** | p=0.500 |
+| `false_positive_rate` | 0.096 | **0.053** | p=0.125 |
+| `false_negative_rate` | 0.140 | **0.120** | p=1.000 |
 
-**Nothing measurable was lost end to end — at 10.1% CER.** That is not because the OCR was clean. The errors are overwhelmingly *deletions* (239 words, ~7% of the document): the layout pass swallowed the line adjacent to each heading, and the entire signature block with it.
+**Paired item by item, OCR caused zero regressions** (`only-A-better = 0`) — across documents whose character error rate ranges from **0.8% to 19.5%**. The direction even mildly favours OCR, but every column sits inside the noise band; +0.040 is not a gain.
 
-Checked against the gold spans, with the original text as the control:
+Why those two facts coexist took three rulers to pin down. Of 87 gold spans, 35 lost their verbatim form. `quote_overlap` (longest *contiguous* token run) says 12 of those are unrecognisable; token coverage says none are missing. Both are wrong at the edges — the first is defeated by errors scattered through a long clause, the second by short golds whose words occur all over the document. A sliding-window minimum edit distance settles it: **all 12 locate to a window at distance 0.03–0.39, so nothing is actually absent.** The clause is still where it was, just misspelt, and both the reranker and the generator tolerate that.
 
-| | Original `.txt` | OCR text |
-|---|:---:|:---:|
-| gold spans present verbatim | **17 / 17** ✅ | **13 / 17** |
+Of the 19 answerable questions whose gold spans all lost verbatim form, 14 were still answered correctly and **the 5 that were not had already failed on the clean text**.
 
-Three questions lost *every* verbatim gold span and were still answered correctly — because a contract restates the same fact in the preamble, the definitions, the clause and the signature block. **The redundancy of contract prose absorbed the loss, not the OCR quality.** So the result does not generalise: a fact that appears exactly once — a company's full legal name in the signature block, a single date, one dollar figure — is dropped **silently and unrecoverably**, and the generator will answer from whatever survived without any error surfacing.
+⚠️ **This replaces a single-contract version of this experiment whose mechanism was wrong.** The earlier run (one contract) attributed the zero loss to *contract prose being redundant* — the same fact restated in the preamble, the definitions and the signature block. The replication shows the text was never deleted in the first place, so redundancy had nothing to rescue. That earlier run also reported a 1.000 clean baseline; across four contracts it is 0.820. **Every number in it was right; the causal story and the baseline were artefacts of n=1.**
 
 Two things worth carrying over:
 
 - **The retrieval-layer eval cannot cross the OCR boundary.** `eval.py` judges hits by `chunk.start / chunk.end` — character offsets into the *original* document. OCR output is a different text, so hit@k / mrr@k are meaningless on `chunks_ocr`. Only the generation layer crosses, because its ruler is content, not position.
-- **The first run of this comparison was invalid**, and the way it failed is this repo's recurring defect: `eval_generation.py` declared `--table` and never read it, so the OCR arm silently ran on the default table. What gave it away was the provenance block honestly recording `table: chunks` while the two arms' token counts matched to the byte. Fixed, and pinned by `tests/test_eval_generation_args.py` — including one test that asserts the reverse property: every switch the override function knows about must actually change the config.
+- **The first attempt at this comparison was invalid**, and the way it failed is this repo's recurring defect: `eval_generation.py` declared `--table` and never read it, so the OCR arm silently ran on the default table. What gave it away was the provenance block honestly recording `table: chunks` while the two arms' token counts matched to the byte. Fixed, and pinned by `tests/test_eval_generation_args.py` — including one test asserting the reverse property: every switch the override function knows about must actually change the config.
 
-Full write-up, including what exactly the OCR dropped, in `docs/demo_ocr_rag.md`.
+Full write-up, including what the OCR dropped and what is still untested, in `docs/demo_ocr_rag.md`.
 
 ---
 

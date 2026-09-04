@@ -7,9 +7,12 @@
 from __future__ import annotations
 
 import importlib.util
+import random
+import zlib
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 _PATH = Path(__file__).resolve().parents[1] / "scripts" / "make_scanned_demo.py"
 _spec = importlib.util.spec_from_file_location("make_scanned_demo", _PATH)
@@ -69,3 +72,40 @@ def test_an_absurd_indent_cannot_eat_the_whole_column():
 def test_every_row_fits_the_column_at_any_width(cols):
     text = Path(__file__).read_text(encoding="utf-8")
     assert all(len(line) <= cols for line in wrap(text, cols) if len(line.split()) > 1)
+
+
+# --- 每份合同各自的随机流 -----------------------------------------------------
+#
+# 第一版共用一个 rng：`random.Random(seed)` 然后按顺序退化所有合同。那样往列表里
+# **插一份**就会改变它之后每一份的噪声，已经发表的 CER 全部作废，而且完全无声——
+# 图看起来一样，数字悄悄变了。现在种子是 seed + crc32(doc_id)。
+
+def _seed_for(seed: int, doc_id: str) -> int:
+    return seed + zlib.crc32(doc_id.encode("utf-8"))
+
+
+def _degrade_bytes(seed: int, doc_id: str) -> bytes:
+    img = Image.new("L", (60, 40), 255)
+    return demo._degrade(img, random.Random(_seed_for(seed, doc_id))).tobytes()
+
+
+def test_the_same_contract_degrades_identically_every_run():
+    """种子定死，重跑逐像素相同——否则文档里的数字下次就对不上。"""
+    assert _degrade_bytes(1, "A.txt") == _degrade_bytes(1, "A.txt")
+
+
+def test_two_contracts_do_not_share_a_noise_stream():
+    assert _degrade_bytes(1, "A.txt") != _degrade_bytes(1, "B.txt")
+
+
+def test_a_contracts_noise_does_not_depend_on_its_neighbours():
+    """**这条是那个 bug 本身。** 一份合同的退化只能由 (seed, doc_id) 决定；
+    它前面渲染过谁、列表里还有谁，都不能影响它。"""
+    alone = _degrade_bytes(7, "target")
+    for neighbour in ("first", "second", "third"):
+        random.Random(7 + zlib.crc32(neighbour.encode()))   # 模拟先渲染了别人
+    assert _degrade_bytes(7, "target") == alone
+
+
+def test_changing_the_seed_changes_the_corpus():
+    assert _degrade_bytes(1, "A.txt") != _degrade_bytes(2, "A.txt")

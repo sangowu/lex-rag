@@ -23,13 +23,22 @@ from __future__ import annotations
 import argparse
 import random
 import sys
+import zlib
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-DEFAULT_DOC = "CENTRACKINTERNATIONALINC_10_29_1999-EX-10.3-WEB SITE HOSTING AGREEMENT"
+# 四份合同，刻意覆盖短→长。**不是一份**：第一版只做了 CENTRACK，而那一轮得出的
+# 结论恰恰是"合同文本的冗余吸收了 OCR 的损失"——一份样本证明不了冗余是普遍的还是
+# 那份合同碰巧。选进来的都是单-gold 问题占比高的（单 gold = 没有第二条 gold 兜底）。
+DEFAULT_DOCS = [
+    "SIBANNAC,INC_12_04_2017-EX-2.1-Strategic Alliance Agreement",
+    "CENTRACKINTERNATIONALINC_10_29_1999-EX-10.3-WEB SITE HOSTING AGREEMENT",
+    "ADAMSGOLFINC_03_21_2005-EX-10.17-ENDORSEMENT AGREEMENT",
+    "FTENETWORKS,INC_02_18_2016-EX-99.4-STRATEGIC ALLIANCE AGREEMENT",
+]
 
 # A4 @ 200 dpi。再高对 OCR 没有增益，只是让上传变慢。
 PAGE_W, PAGE_H = 1654, 2339
@@ -116,36 +125,43 @@ def _degrade(img: Image.Image, rng: random.Random) -> Image.Image:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="CUAD 合同 → 合成扫描件（PDF）")
-    ap.add_argument("--doc-id", default=DEFAULT_DOC)
+    ap.add_argument("--doc-id", nargs="+", default=DEFAULT_DOCS,
+                    help="要渲染的 CUAD doc_id，可给多个")
     ap.add_argument("--docs-dir", default="data/cuad_docs")
     ap.add_argument("--out-dir", default="data/scanned_docs")
     ap.add_argument("--seed", type=int, default=20260904,
                     help="定死种子，重跑得到相同的图；换种子等于换了一份语料")
     args = ap.parse_args()
 
-    src = Path(args.docs_dir) / f"{args.doc_id}.txt"
-    if not src.exists():
-        raise SystemExit(f"找不到原文：{src}")
-
-    text = src.read_text(encoding="utf-8", errors="replace")
     font = _load_font()
-    cols = (PAGE_W - 2 * MARGIN_X) // font.getlength("M")
-    pages = _render_pages(_wrap(text, int(cols)), font)
-
-    rng = random.Random(args.seed)
-    pages = [_degrade(p, rng).convert("RGB") for p in pages]
-
+    cols = int((PAGE_W - 2 * MARGIN_X) // font.getlength("M"))
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    # 输出**单个多页 PDF**，文件名就是 doc_id：ingest_ocr.py 用 path.stem 当 doc_id，
-    # 拆成多张图会把一份合同变成 6 个文档，按 doc_id 检索就对不上 CUAD 的问答对了。
-    out = out_dir / f"{args.doc_id}.pdf"
     # PdfImagePlugin 直接查 Image.SAVE["JPEG"]，而这张表要 Image.init() 之后才有内容
     # （平时由 open/save 顺带触发）。少这一行会以 KeyError: 'JPEG' 挂掉。
     Image.init()
-    pages[0].save(out, save_all=True, append_images=pages[1:], resolution=200.0)
 
-    print(f"{len(pages)} 页 -> {out}  ({out.stat().st_size / 1024:.0f} KB)")
+    total = 0
+    for doc_id in args.doc_id:
+        src = Path(args.docs_dir) / f"{doc_id}.txt"
+        if not src.exists():
+            raise SystemExit(f"找不到原文：{src}")
+
+        pages = _render_pages(_wrap(src.read_text(encoding="utf-8", errors="replace"), cols), font)
+        # 每份合同用**自己的** rng：否则往列表里插一份就会改变后面所有合同的噪声，
+        # 已经发表的数字全部作废。种子里掺 doc_id 让它既确定又互不影响。
+        rng = random.Random(args.seed + zlib.crc32(doc_id.encode("utf-8")))
+        pages = [_degrade(p, rng).convert("RGB") for p in pages]
+
+        # 输出**单个多页 PDF**，文件名就是 doc_id：ingest_ocr.py 用 path.stem 当
+        # doc_id，拆成多张图会把一份合同变成 N 个文档，按 doc_id 检索就对不上
+        # CUAD 的问答对了。
+        out = out_dir / f"{doc_id}.pdf"
+        pages[0].save(out, save_all=True, append_images=pages[1:], resolution=200.0)
+        total += len(pages)
+        print(f"{len(pages):3d} 页 -> {out.name}  ({out.stat().st_size / 1024:.0f} KB)")
+
+    print(f"共 {len(args.doc_id)} 份 / {total} 页 -> {out_dir}")
     return 0
 
 
