@@ -2,6 +2,7 @@ from pathlib import Path
 from lex_rag.config import AppConfig
 from lex_rag.chunking import chunk_text, chunk_parent_child, ChunkWindow
 from lex_rag.embeddings import EmbeddingClient
+from lex_rag.ingest_guard import SourceRecord, Verdict, classify, content_digest
 from lex_rag.reranker import RerankClient
 from lex_rag.store import VectorStore
 from lex_rag.strategy import RetrievalStrategy
@@ -105,8 +106,23 @@ class RAGPipeline:
             self._chunk_mode_cache = meta.get("chunk_mode") or "standard"
         return self._chunk_mode_cache
 
-    def _ingest_one(self, doc_id: str, text: str) -> None:
-        """ingest 单个文档的核心逻辑（不含 TRUNCATE）。"""
+    def _ingest_one(self, doc_id: str, text: str,
+                    source: str = "") -> tuple[SourceRecord, Verdict, SourceRecord | None]:
+        """ingest 单个文档的核心逻辑（不含 TRUNCATE）。
+
+        返回 `(本次指纹, 判定, 上次指纹)` —— 正是 `ingest_guard.summarise` 要的三元组。
+        返回三元组而不是只返回判定，是为了让调用方不必**再查一次** DB 才能打印
+        "从 abc 变成 def"；上一版就是那样，多一次往返还多一处会和这里不一致的地方。
+
+        指纹在 chunk 写入**之前**取，取的是喂进来的那份文本——切分、contextual 前缀、
+        embedding 都不影响它，它回答的是"这份文件是不是上次那份"，不是"这次 ingest
+        的产物是否相同"。
+        """
+        record = SourceRecord(doc_id=doc_id, sha256=content_digest(text),
+                              n_chars=len(text), source=source)
+        previous = self.store.get_doc_source(doc_id)
+        verdict = classify(previous, record)
+
         pc_cfg = self.cfg.parent_child
         if self.cfg.chunk_mode == "parent_child":
             parents, children = chunk_parent_child(
@@ -132,16 +148,24 @@ class RAGPipeline:
             meta = self.meta_extractor.extract(doc_id, text)
             self.store.add_doc_meta(doc_id, meta)
 
-    def ingest(self, docs_dir: Path) -> None:
+        # 写在最后：中途失败就不该留下"已经见过这一版"的记录，否则下次重跑会把
+        # 一次失败的 ingest 认成"未变"，然后什么都不做。
+        self.store.save_doc_source(record)
+        return record, verdict, previous
+
+    def ingest(self, docs_dir: Path) -> list:
         if not docs_dir.exists():
             raise FileNotFoundError(f"Documents directory not found: {docs_dir}")
         paths = list(docs_dir.glob("*.txt"))
         # 显式换行日志：tqdm 默认用 \r 刷新进度条，在非 TTY 环境（如 ECS/
         # CloudWatch）里可能被日志驱动缓冲、迟迟看不到任何输出，容易被误判为卡死。
+        results = []
         for i, path in enumerate(paths, 1):
             print(f"[{i}/{len(paths)}] ingesting {path.stem} ...", flush=True)
-            self._ingest_one(path.stem, path.read_text(encoding="utf-8"))
+            results.append(self._ingest_one(
+                path.stem, path.read_text(encoding="utf-8"), source=str(path)))
         print(f"Ingested {len(paths)} documents.", flush=True)
+        return results
 
     def ingest_document(self, path: Path) -> None:
         """增量 ingest 单个文档，不清空现有数据（用于运行时文档上传）。"""

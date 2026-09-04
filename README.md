@@ -309,6 +309,26 @@ So the criterion does not have a hole here — it is working, and this payload l
 
 Full write-up in `docs/experiments.md`.
 
+### Source fingerprints at ingest
+
+The availability probes ended on a finding with nowhere to go in the prompt: the one payload that worked was a clause *binding the parties* — "Section 8 is hereby deleted by Amendment No. 2" — and refusing on that is the correct legal reading. **Whoever can write into the corpus can change the answers, and no prompt can stop it** without also breaking the model's ability to honour real amendments. That defence belongs at ingest, and until now none existed.
+
+`lex_rag/ingest_guard.py` is the minimum version of it: it does not prevent a change, it makes a change **impossible to miss**. Every ingest records a whitespace-normalised SHA-256 per `(table, doc_id)` and reports `new / unchanged / changed`, naming both digests for anything that moved:
+
+```
+来源指纹：0 新增 / 24 未变 / 1 变更
+  ⚠️ 内容已变更：LIMEENERGYCO_09_09_1999-EX-10-DISTRIBUTOR AGREEMENT
+       12fefab3dae8 -> f3c9b7dc1416   54312 字符（-256）
+```
+
+Three decisions that make it work rather than merely exist:
+
+- **`TRUNCATE` must not clear the fingerprints.** A full ingest starts by truncating; if the digests went with it, every rebuild would report all documents as `new` and `changed` could never fire. The mechanism only means anything if the fingerprints outlive the rebuild — pinned by a test, because the failure mode is silence.
+- **Scoped per table, not per document.** The same contract legitimately lives in `chunks` and `chunks_ocr` with different text; a shared row would make the two ingest paths accuse each other.
+- **Whitespace is normalised away, case and punctuation are not.** Reflowed EDGAR spacing and a re-run of OCR must not raise an alarm; a changed date, a dropped `not`, or `Term` becoming `term` must. This is deliberately *not* the same ruler as `text_match.normalize` — that one asks "does this answer match the gold", this one asks "is this the same document".
+
+Reporting is the default; `--fail-on-changed-source` turns it into a blocking check for a pipeline. Defaulting to blocking would just teach whoever rebuilds the corpus to pass a `--force` flag every day.
+
 ### OCR → RAG end-to-end
 
 `scripts/ingest_ocr.py` existed but had never been run end to end. The blocker was corpus: OmniDocBench has nine document classes and **none of them is a contract**, and a real scanned contract comes with no ground truth, which leaves you with a screenshot instead of a measurement. So the demo renders four CUAD contracts *back* into scans (32 pages, monospace, slight skew, defocus, sensor noise), keeping both the verbatim ground truth and the 164 CUAD question/answer pairs that already exist for those documents.

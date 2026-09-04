@@ -13,6 +13,7 @@ from pathlib import Path
 from lex_rag.config import load_config
 from lex_rag.cuad import build_qa_from_hf
 from lex_rag.pipeline import RAGPipeline
+from lex_rag.ingest_guard import Verdict, summarise
 
 
 def main() -> None:
@@ -35,6 +36,10 @@ def main() -> None:
     parser.add_argument("--overlap",        type=int, default=None,       help="覆盖 config.yaml 中的 chunking.overlap")
     parser.add_argument("--chunk-chars",    type=int, default=None,       help="覆盖 config.yaml 中的 chunking.chunk_chars")
     parser.add_argument("--refresh-cache",  action="store_true",          help="忽略 embed cache，强制重新计算所有向量（换模型时必须使用）")
+    # 默认只报告不阻断：交互式重灌语料时天天被拦住，人只会学会加 --force。
+    # 要在流水线里当门禁用，显式打开。
+    parser.add_argument("--fail-on-changed-source", action="store_true",
+                        help="有文档内容与上次 ingest 不同时退出码 1（默认只报告）")
     args = parser.parse_args()
 
     docs_dir = Path(args.docs_dir)
@@ -96,7 +101,7 @@ def main() -> None:
         if not args.no_truncate:
             print(f"Truncating {cfg.database.table} ...")
             pipeline.store.truncate()
-        pipeline.ingest(docs_dir)
+        results = pipeline.ingest(docs_dir)
         pipeline.store.save_meta(
             chunk_chars=cfg.chunking.chunk_chars,
             overlap=cfg.chunking.overlap,
@@ -106,6 +111,11 @@ def main() -> None:
         )
     finally:
         pipeline.close()
+
+    print()
+    print(summarise(results))
+    if args.fail_on_changed_source and any(v is Verdict.CHANGED for _, v, _ in results):
+        raise SystemExit(1)
 
     print("Ingest complete.")
 
