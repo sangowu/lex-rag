@@ -5,6 +5,7 @@ import numpy as np
 import psycopg
 from pgvector.psycopg import register_vector
 from lex_rag.chunking import ChunkWindow
+from lex_rag.ingest_guard import SourceRecord
 
 
 class VectorStore:
@@ -105,6 +106,20 @@ class VectorStore:
             cur.execute("""
                 ALTER TABLE ingest_meta ADD COLUMN IF NOT EXISTS chunk_mode TEXT DEFAULT 'standard'
             """)
+            # 来源指纹表。**按 (table_name, doc_id) 主键**：同一份合同可以同时存在于
+            # chunks 和 chunks_ocr，而那两份文本本来就不同，共用一行会互相报警。
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS doc_source (
+                    table_name  TEXT,
+                    doc_id      TEXT,
+                    sha256      TEXT NOT NULL,
+                    n_chars     INT,
+                    source      TEXT,
+                    first_seen  TIMESTAMPTZ DEFAULT now(),
+                    ingested_at TIMESTAMPTZ DEFAULT now(),
+                    PRIMARY KEY (table_name, doc_id)
+                )
+            """)
             # 文档级 metadata 表（所有表共用一张）
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS doc_meta (
@@ -158,8 +173,36 @@ class VectorStore:
         }
 
     def truncate(self) -> None:
+        """只清 chunk 表。
+
+        ⚠️ **`doc_source` 必须活下来，这不是疏漏。** 全量 ingest 的第一步就是
+        TRUNCATE，如果指纹跟着清掉，那么每一次重灌之后所有文档都变成"新增"，
+        `CHANGED` 永远不会出现——这个机制就等于没有。**指纹要跨重灌存活，
+        才能回答"这份文件和上次不一样"。** 由 tests/test_ingest_guard.py 钉住。
+        """
         with self._cursor() as cur:
             cur.execute(f"TRUNCATE TABLE {self.table}")
+
+    def get_doc_source(self, doc_id: str) -> SourceRecord | None:
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT doc_id, sha256, n_chars, source FROM doc_source "
+                "WHERE table_name = %s AND doc_id = %s", (self.table, doc_id))
+            row = cur.fetchone()
+        return SourceRecord(row[0], row[1], row[2] or 0, row[3] or "") if row else None
+
+    def save_doc_source(self, rec: SourceRecord) -> None:
+        with self._cursor() as cur:
+            cur.execute("""
+                INSERT INTO doc_source
+                    (table_name, doc_id, sha256, n_chars, source, ingested_at)
+                VALUES (%s, %s, %s, %s, %s, now())
+                ON CONFLICT (table_name, doc_id) DO UPDATE
+                    SET sha256      = EXCLUDED.sha256,
+                        n_chars     = EXCLUDED.n_chars,
+                        source      = EXCLUDED.source,
+                        ingested_at = now()
+            """, (self.table, rec.doc_id, rec.sha256, rec.n_chars, rec.source))
 
     def add_chunks(self, chunks: list[ChunkWindow], embeddings: list[list[float]]) -> None:
         """一批 chunk 一个事务。

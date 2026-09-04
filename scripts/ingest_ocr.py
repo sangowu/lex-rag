@@ -28,6 +28,7 @@ from dotenv import load_dotenv
 from tqdm import tqdm
 
 from lex_rag import ocr
+from lex_rag.ingest_guard import Verdict, summarise
 
 SUPPORTED_EXTS = {".pdf", ".png", ".jpg", ".jpeg", ".jp2", ".webp", ".gif", ".bmp"}
 
@@ -54,6 +55,8 @@ def main() -> None:
                         help="不清空现有数据，增量追加")
     parser.add_argument("--contextual",  action="store_true",
                         help="为每个 chunk 调用 Gemini 生成上下文前缀")
+    parser.add_argument("--fail-on-changed-source", action="store_true",
+                        help="有文档内容与上次 ingest 不同时退出码 1（默认只报告）")
     ocr.add_ocr_args(parser)
     args = parser.parse_args()
     # Windows 控制台默认 GBK，遇到 emoji 会抛 UnicodeEncodeError —— 重设为 utf-8。
@@ -92,6 +95,7 @@ def main() -> None:
             print(f"清空表 {cfg.database.table} ...")
             pipeline.store.truncate()
 
+        results = []
         opts = ocr.options_from_args(args)
         print(f"MinerU 在线 API: {ocr.MINERU_API_BASE}  model_version={opts.model_version}")
 
@@ -114,7 +118,7 @@ def main() -> None:
                         if not md.strip():
                             bar.write(f"  ⚠️ OCR 返回空内容，跳过：{path.name}")
                             continue
-                        pipeline._ingest_one(path.stem, md)
+                        results.append(pipeline._ingest_one(path.stem, md, source=str(path)))
                     except Exception as e:
                         bar.write(f"  ⚠️ ingest 失败（{path.name}）：{e}")
                 bar.update(len(batch))
@@ -128,6 +132,14 @@ def main() -> None:
         )
     finally:
         pipeline.close()
+
+    # OCR 这条路径比 ingest.py 更需要指纹：**同一份扫描件重跑 OCR，文本会变**
+    # （`docs/demo_ocr_rag.md` 实测换个噪声实例 CER 就差 0.0017）。没有指纹的话，
+    # "语料被人改写了"和"这一轮 OCR 跑歪了"在数据库里长得一模一样。
+    print()
+    print(summarise(results))
+    if args.fail_on_changed_source and any(v is Verdict.CHANGED for _, v, _ in results):
+        raise SystemExit(1)
 
     print("Ingest complete.")
 
