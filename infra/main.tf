@@ -59,6 +59,11 @@ locals {
     EMBED_API_KEY      = "/${var.service_name}/embed-api-key"
     RERANK_API_KEY     = "/${var.service_name}/rerank-api-key"
     GENERATE_MODEL_API = "/${var.service_name}/generate-model-api"
+    # serve.py 在非回环地址上**没有 API_KEYS 就拒绝启动**（见 lex_rag/api_safety.py）。
+    # 这一条缺了整整一个版本：应用长出了新要求，任务定义没跟上，症状是容器起来
+    # 立刻退出——而 ECS 会不停重启它，看起来像镜像坏了。
+    # 加在这张表里就够了：data source、容器 secrets、IAM 读取权限全从这里推导。
+    API_KEYS           = "/${var.service_name}/api-keys"
   }
 
   # 拼出完整的 ECR 镜像地址，替代原来硬编码的
@@ -115,11 +120,15 @@ resource "aws_ecs_task_definition" "app" {
       name  = var.service_name
       image = local.image_uri
 
+      # --no-ui 不是可选的：serve.py 拒绝在非回环地址上挂着 Gradio 启动
+      # （除非显式 --allow-public-ui）。而公网挂 UI 本来就不该做——浏览器发不出
+      # 自定义头，所以 /ui 是鉴权豁免路径，等于把整个合同库开给全世界。
       command = [
         "python", "scripts/serve.py",
         "--host", "0.0.0.0",
         "--port", tostring(var.container_port),
         "--root-path", "/legal-rag",
+        "--no-ui",
       ]
 
       portMappings = [

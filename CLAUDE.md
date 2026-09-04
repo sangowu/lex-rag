@@ -872,6 +872,26 @@ FP 0.060→0.047、FN 0.120→0.100，**McNemar 全部落在噪声里**，cosine
 真库验证过五个状态转移：首次 `new` → 重复 `unchanged` → 只改空白 `unchanged`
 → 改一个词 `changed` → **TRUNCATE 之后再灌同一份 `unchanged`**。
 
+## 部署配置与启动守卫必须对齐（`tests/test_deploy_config.py`）
+
+`serve.py` 有两道启动守卫（非回环地址必须有 `API_KEYS`；公网不许挂 Gradio），
+而 `deploy/task-definition.json` 与 `infra/main.tf` 曾经**两道全撞**——
+跑 `--host 0.0.0.0`、没有 `API_KEYS`、还挂着 UI。
+
+⚠️ **症状不是"部署失败"，是容器起来立刻退出、ECS 不停重启它**，看起来像镜像坏了。
+这个洞躺了整整一个版本没人发现，因为 AWS 侧是下线的、没人真跑过。
+
+- 测试**不重新实现判断**，而是把任务定义喂给线上同一个 `bind_safety_error()`：
+  改了守卫测试就跟着变，不会出现"测试过了但线上起不来"。
+- 另有一条**反向**测试（旧配置必须报错），否则守卫哪天永远返回 None，
+  正向那条会安静地继续通过。
+- `deploy/task-definition.json` 与 `infra/main.tf` 内容重复，**这正是漂移的来源**
+  （本仓库第六次栽在"两处各写一份、分叉时无声"上），所以也钉住两者一致。
+- Terraform 侧只需往 `local.runtime_secrets` 加一行：data source、容器 secrets、
+  IAM 读取权限全从那张表推导。
+- ⚠️ 加了之后 **`/legal-rag-v1/api-keys` 不存在时 `terraform plan` 就会
+  ParameterNotFound**（`data.aws_ssm_parameter` 是 for_each 那张表的），恢复部署前先建。
+
 ## 关键约束
 
 - **`reranker.enabled` 必须是 `true`，否则线上跑的不是被评测的那条配置**（2026-08-29 修）。
