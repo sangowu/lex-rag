@@ -215,7 +215,28 @@ question → embeddings.py → store.py（vector / bm25 / hybrid RRF）
 - **`chunks` / `chunks_contextual`**（或任意自定义表名）：`chunk_id PK, doc_id, text, start_pos, end_pos, embedding vector(1024), tsv tsvector GENERATED`
 - **`ingest_meta`**：`table_name PK, chunk_chars, overlap, strategy, contextual, ingested_at`
 
-### OCR 管道（独立，未接入 RAG）
+### OCR 管道
+
+> ✅ **端到端已跑通并量化**（2026-09-04），见 `docs/demo_ocr_rag.md`。
+> 合成扫描件由 `scripts/make_scanned_demo.py` 从 CUAD 原文反向渲染（种子定死）——
+> OmniDocBench 九类里**没有合同**，而真实扫描合同没有 ground truth。
+> 结果：**CER 10.1% / WER 14.5%，端到端指标一个点都没掉**（semantic_hit 1.000、
+> FP 0.032、FN 0.000，两臂相同）。
+>
+> ⚠️ **"零损失"不能外推。** 误差主要是**删除**（239 词 / 约 7%，版面分析把标题相邻
+> 的正文一起吃掉，整个签名块没了），17 条 gold span 里 **4 条确因 OCR 消失**，
+> 波及 3 个问题——**这 3 个问题仍然全部答对，靠的是合同文本自身的冗余**
+> （同一事实在序言 / 定义 / 条款 / 签名块里重复），不是 OCR 质量。
+> 只出现一次的事实被吃掉就是**不可恢复且无声**的。
+>
+> ⚠️ **检索层评测跨不过 OCR 边界**：`eval.py` 的 gold 判据是原始文档的字符偏移，
+> OCR 是另一份文本，`hit@k` 在 `chunks_ocr` 上算出来是垃圾。只有生成层能跨
+> （判据是内容不是位置）。
+>
+> ⚠️ 输出必须是**单个多页 PDF**：`ingest_ocr.py` 用 `path.stem` 当 `doc_id`，
+> 拆成逐页 PNG 会把一份合同变成 N 个文档，按 `doc_id` 检索就对不上问答对。
+
+### OCR 管道细节
 
 ```
 eval_ocr.py（本地，按 --batch-size 成批）
@@ -834,3 +855,15 @@ FP 0.060→0.047、FN 0.120→0.100，**McNemar 全部落在噪声里**，cosine
 - Embedding / Reranker endpoint 由 `config.yaml` 的 `embedding.base_url` / `reranker.base_url` 指定，需要提前启动；两者可以是同一个服务，也可以分开。远程 GPU 时通过 `provider: ssh_tunnel` 配置 SSH 端口转发
 - OCR 走 MinerU 在线 API（`lex_rag/ocr.py`），自建 mineru-api 服务与 SSH 隧道已移除。上传到预签名 URL 时**不要设置 Content-Type、不要带 Authorization**（签名已在 URL 里，多带会 403）；轮询结果必须按 `data_id` 回填而不是按返回顺序——顺序错位不会报错，只会让每个样本对上别人的 ground truth
 - Grid search 中 `data/runs/grid/20260522T*` 两次历史结果因 BM25 bug 无效，不可引用
+
+- **`eval_generation.py` 的 `--table` 曾经只被声明、从没被读过**（2026-09-04 修）。
+  `--table chunks_ocr` 被静默忽略，评测照样跑完、照样出结果，只不过跑的是默认表。
+  **这是本仓库第五次栽在"配置变了、读它的人没跟着变、而且完全无声"上**
+  （前四次：`serve.py` 写死 `top_k`、`reranker.enabled`、`eval.py` 写死 `hit@k`、
+  门禁自带的第二份归一化）。**五次全部靠人眼发现**，这次的线索是 provenance 老实
+  写着 `table: chunks`、且两臂 `avg_tokens` 一个字节不差。
+  覆盖逻辑已抽成纯函数 `apply_cli_overrides(cfg, args)`，由
+  `tests/test_eval_generation_args.py` 钉住——其中一条是反向的：**凡是它认得的开关，
+  传了值就必须改动 cfg**，新加一个只声明不读的开关会在那里露出来。
+  ⚠️ 判据不能是"跑起来不报错"，坏掉的那版也不报错。
+  ➜ **加新 CLI 开关时，同时加一条"它真的改到了 cfg"的测试。**

@@ -309,6 +309,34 @@ So the criterion does not have a hole here — it is working, and this payload l
 
 Full write-up in `docs/experiments.md`.
 
+### OCR → RAG end-to-end
+
+`scripts/ingest_ocr.py` existed but had never been run end to end — `data/scanned_docs` was empty. The blocker was corpus: OmniDocBench has nine document classes and **none of them is a contract**, and a real scanned contract comes with no ground truth, which leaves you with a screenshot instead of a measurement. So the demo renders a CUAD contract *back* into a 6-page scan (monospace, slight skew, defocus, sensor noise), which keeps both the verbatim ground truth and the 41 CUAD question/answer pairs that already exist for that document.
+
+| | Clean text | **OCR text** |
+|---|:---:|:---:|
+| `semantic_hit_rate` | 1.000 | **1.000** |
+| `false_positive_rate` | 0.032 | **0.032** |
+| `false_negative_rate` | 0.000 | **0.000** |
+| chunks | 21 | 19 |
+
+**Nothing measurable was lost end to end — at 10.1% CER.** That is not because the OCR was clean. The errors are overwhelmingly *deletions* (239 words, ~7% of the document): the layout pass swallowed the line adjacent to each heading, and the entire signature block with it.
+
+Checked against the gold spans, with the original text as the control:
+
+| | Original `.txt` | OCR text |
+|---|:---:|:---:|
+| gold spans present verbatim | **17 / 17** ✅ | **13 / 17** |
+
+Three questions lost *every* verbatim gold span and were still answered correctly — because a contract restates the same fact in the preamble, the definitions, the clause and the signature block. **The redundancy of contract prose absorbed the loss, not the OCR quality.** So the result does not generalise: a fact that appears exactly once — a company's full legal name in the signature block, a single date, one dollar figure — is dropped **silently and unrecoverably**, and the generator will answer from whatever survived without any error surfacing.
+
+Two things worth carrying over:
+
+- **The retrieval-layer eval cannot cross the OCR boundary.** `eval.py` judges hits by `chunk.start / chunk.end` — character offsets into the *original* document. OCR output is a different text, so hit@k / mrr@k are meaningless on `chunks_ocr`. Only the generation layer crosses, because its ruler is content, not position.
+- **The first run of this comparison was invalid**, and the way it failed is this repo's recurring defect: `eval_generation.py` declared `--table` and never read it, so the OCR arm silently ran on the default table. What gave it away was the provenance block honestly recording `table: chunks` while the two arms' token counts matched to the byte. Fixed, and pinned by `tests/test_eval_generation_args.py` — including one test that asserts the reverse property: every switch the override function knows about must actually change the config.
+
+Full write-up, including what exactly the OCR dropped, in `docs/demo_ocr_rag.md`.
+
 ---
 
 ## Configuration highlights (`config.yaml`)
@@ -383,7 +411,7 @@ Honest next steps to take this from "strong portfolio project" to "deployable se
 - [x] CI (GitHub Actions: `ruff` + `pytest`).
 - [x] Wire the OCR pipeline's output directly into the RAG ingest path end-to-end (`scripts/ingest_ocr.py`).
 - [x] **API auth / rate-limiting / structured request logging** — see [API safety](#api-safety).
-- [ ] **An end-to-end OCR→RAG demo doc** — the code path exists; the two-minute narrated version of it does not.
+- [x] **An end-to-end OCR→RAG demo doc** — see [OCR → RAG end-to-end](#ocr--rag-end-to-end) and `docs/demo_ocr_rag.md`.
 - [x] **Release gates** — see [Release gate](#release-gate); it found a live prompt-injection hole on its first real run, which is now fixed and pinned.
 - [x] **A probe for availability-style injection** — three gag-order probes, hard-zero threshold; see [Being forced to refuse](#being-forced-to-refuse). What it found was that the *effective* availability attack is not an injection at all.
 
